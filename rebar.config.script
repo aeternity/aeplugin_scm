@@ -1,0 +1,41 @@
+%% -*- mode:erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
+
+AERoot = fun() ->
+                 case os:getenv("AE_ROOT") of
+                     false ->
+                         Dir = filename:dirname(SCRIPT),
+                         case file:read_link(filename:join(Dir, "aeternity")) of
+                             {ok, Target} ->
+                                 Target;
+                             {error, _} ->
+                                 undefined
+                         end;
+                     Root ->
+                         Root
+                 end
+         end.
+
+case AERoot() of
+    undefined ->
+        CONFIG;
+    Root ->
+        MyDeps = proplists:get_value(deps, CONFIG, []),
+        AeDeps = proplists:get_value(
+                   deps,
+                   rebar_config:consult(Root)),
+        MyDeps1 =
+            lists:map(
+              fun(A) when is_atom(A) ->
+                      case lists:keyfind(A, 1, AeDeps) of
+                          false -> A;
+                          Dep -> Dep
+                      end;
+                 (Dep) ->
+                      Dep
+              end, MyDeps),
+        case MyDeps1 of
+            [] -> CONFIG;
+            _ when MyDeps1 =/= MyDeps ->
+                lists:keystore(deps, 1, CONFIG, {deps, MyDeps1})
+        end
+end.

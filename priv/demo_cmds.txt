@@ -1,0 +1,43 @@
+%% -*- mode: erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
+
+%% Steps to prepare some simple testing
+%% - clone aeplugin_dev_mode (branch uw-export-helper-functions)
+%% - in an aeternity (master) local build, go to_build/local/rel/aeternity/plugins/
+%%   and create symlinks to aeplugin_dev_mode (as aeplugin_dev_mode-0.1.0) and
+%%   aeplugin_scm (as aeplugin_scm-0.1.0)
+%% - export AETERNITY_CONFIG=(...)/aeplugin_scm/aeternity_config.yaml
+%% - start an ae node, and attach two remote_console windows
+%% - paste the below commands into the two windows (the respond/initiate commands in one each)
+
+%% Connect with browser to http://127.0.0.1:3313
+%% Emit some key blocks to earn some money, then spend some of it to some demo accounts
+
+Priv = fun(Pub) -> proplists:get_value(Pub, aeplugin_dev_mode_handler:demo_keypairs(), <<>>) end.
+Accts = [{Pub,Priv(Pub),Bal} || {Pub,Bal} <- aeplugin_dev_mode_handler:account_balances(), Bal > 1000000000].
+Pairs = [{Pu,Pr} || {Pu,Pr,_} = X <- Accts, Pr =/= <<>>].
+
+%% Pick some accounts for responder and initiator, example:
+{IPub,IPriv} = hd(Pairs).
+{RPub,RPriv} = hd(tl(Pairs)).
+
+ChOpts = #{responder => RPub, initiator => IPub, channel_reserve => 100000000000000, initiator_amount => 1000000000000000, responder_amount => 1000000000000000, lock_period => 10, push_amount => 0}.
+
+
+aeplugin_scm_sc:respond({127,0,0,1},3333,ChOpts#{sign => #{privkey => RPriv}}).
+
+
+aeplugin_scm_sc:initiate({127,0,0,1},3333,ChOpts#{sign => #{privkey => IPriv}}).
+
+
+%% some tracing commands for debugging
+
+dbg:tracer().
+dbg:tpl(aeplugin_scm_sc,x).
+dbg:tpl(aesc_session_noise,x).
+dbg:tpl(enoise,x).
+dbg:tpl(enoise_hs_state,x).
+dbg:tpl(enoise_keypair,x).
+dbg:p(all,[c]).
+
+%% ISSUES
+%% * aesc_client doesn't do a quick check for missing mandatory parameters

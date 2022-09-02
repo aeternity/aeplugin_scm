@@ -1,0 +1,22 @@
+{
+    "$schema" : "http://json-schema.org/draft-04/schema#",
+    "type" : "object",
+    "additionalProperties" : false,
+    "properties" : {
+        "channel_defaults" : {
+	    "type" : "object",
+	    "additionalProperties" : false,
+	    "properties" : {
+		"minimum_depth" : {
+		    "type" : "integer",
+		    "help" : "minimum_depth value (0 means microblock confirmation)",
+		    "default" : 3
+		},
+		"channel_reserve" : {
+		    "type" : integer,
+		    "help" : "Channel reserve default",
+		    "default" : 100000000000000
+		}
+	    }
+    }
+}

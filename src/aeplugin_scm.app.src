@@ -1,0 +1,27 @@
+%% -*- mode: erlang; erlang-indent-level: 4; indent-tabs-mode: nil -*-
+{application, aeplugin_scm,
+ [{description, "AE node plugin for a State Channel Market demo"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {aeplugin_scm_app, []}},
+  {start_phases, [{check_config, []}]},
+  {applications, [kernel, stdlib, aecore, aechannel]},
+  {env,
+   [{'$setup_hooks',
+     [{normal,
+       [
+        {110, {aeplugin_scm_app, check_env, []}}
+       ]}
+     ]},
+    {'$app_ctrl',
+     [{modify,
+       [
+        {roles, [{basic, [join]}]}
+       ]}
+     ]}
+   ]},
+  {modules, []},
+  {licenses, ["ISC"]},
+  {links, ["https://github.com/aeterity/aeternity",
+           "https://github.com/aeternity/aeplugin_scm"]}
+ ]}.
