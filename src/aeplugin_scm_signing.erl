@@ -3,6 +3,10 @@
 -export([ verify_signing_config/1
 	, sign_tx/2 ]).
 
+-export_type([signing_fun/0]).
+
+-type signing_fun() :: fun( (binary()) -> binary() ).
+
 sign_tx(SignedTx, #{sign := Sign}) ->
     Tx = aetx_sign:innermost_tx(SignedTx),
     [NewSignature] = aetx_sign:signatures(do_sign_tx(Tx, Sign)),
@@ -34,6 +38,9 @@ modify_innermost_tx(SignedTx, ModFun) ->
             ModFun(SignedTx)
     end.
 
+-spec verify_signing_config(map() | signing_fun()) -> signing_fun().
+verify_signing_config(Fun) when is_function(Fun, 1) ->
+    Fun;
 verify_signing_config(#{privkey := PrivKey}) ->
     fun(Bin) ->
             enacl:sign_detached(Bin, PrivKey)

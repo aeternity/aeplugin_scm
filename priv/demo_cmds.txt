@@ -18,22 +18,26 @@ Pairs = [{Pu,Pr} || {Pu,Pr,_} = X <- Accts, Pr =/= <<>>].
 
 %% Pick some accounts for responder and initiator, example:
 {IPub,IPriv} = hd(Pairs).
-{RPub,RPriv} = hd(tl(Pairs)).
 
-ChOpts = #{responder => RPub, initiator => IPub, channel_reserve => 100000000000000, initiator_amount => 1000000000000000, responder_amount => 1000000000000000, lock_period => 10, push_amount => 0}.
+#{pubkey := RPub, privkey := RPriv} = aecore_env:patron_keypair_for_testing().
+
+ChOpts = #{responder => RPub, initiator => IPub, channel_reserve => 100000000000000, initiator_amount => 1000000000000000, responder_amount => 1000000000000000, lock_period => 10, push_amount => 0, noise => [{noise,<<"Noise_NN_25519_ChaChaPoly_BLAKE2b">>}]}.
+
+aeplugin_scm_sc:initiate({127,0,0,1},3333,ChOpts#{sign => #{privkey => IPriv}}).
 
 
 aeplugin_scm_sc:respond({127,0,0,1},3333,ChOpts#{sign => #{privkey => RPriv}}).
 
 
-aeplugin_scm_sc:initiate({127,0,0,1},3333,ChOpts#{sign => #{privkey => IPriv}}).
-
+%% In order to trigger min-depth confirmation, produce some keyblocks
+aeplugin_dev_mode_emitter:emit_keyblocks(5).
 
 %% some tracing commands for debugging
 
 dbg:tracer().
 dbg:tpl(aeplugin_scm_sc,x).
 dbg:tpl(aesc_session_noise,x).
+dbg:tp(aesc_client,x).
 dbg:tpl(enoise,x).
 dbg:tpl(enoise_hs_state,x).
 dbg:tpl(enoise_keypair,x).
