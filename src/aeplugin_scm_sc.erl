@@ -5,6 +5,9 @@
 -export([ initiate/3
         , respond/3 ]).
 
+-export([ close_mutual/1
+        ]).
+
 -export([ init/1
         , handle_call/3
         , handle_cast/2
@@ -60,13 +63,24 @@ start(Opts) ->
 init(Opts) ->
     start_channel(Opts).
 
-
+handle_call(close_mutual, From, #{fsm := Fsm} = St) ->
+    aesc_fsm:shutdown(Fsm, #{}),
+    await_tx_to_sign(shutdown, St, ?TIMEOUT),
+    gen_server:reply(From, ok),
+    receive_on_chain_tx(channel_close_mutual_tx, St, ?TIMEOUT),
+    {stop, normal, St};
 handle_call(_Rec, _From, St) ->
     {reply, {error, unknown_request}, St}.
 
 handle_cast(_Msg, St) ->
     {noreply, St}.
 
+handle_info({aesc_fsm, Fsm, #{ type := report
+                             , tag  := shutdown }}, #{fsm := Fsm} = St) ->
+    %% TODO: Check shutdown message for funds distribution
+    await_tx_to_sign(shutdown_ack, St, ?TIMEOUT),
+    receive_on_chain_tx(channel_close_mutual_tx, St, ?TIMEOUT),
+    {stop, normal, St};
 handle_info(_Mst, St) ->
     {noreply, St}.
 
