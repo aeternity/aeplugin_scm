@@ -1,7 +1,15 @@
 {"1.2.0",
-[{<<"aeserialization">>,
+[{<<"aebytecode">>,
+  {git,"https://github.com/aeternity/aebytecode.git",
+       {ref,"7497345928dfba628eab30cfd33db62966e7ddef"}},
+  1},
+ {<<"aeserialization">>,
   {git,"https://github.com/aeternity/aeserialization.git",
        {ref,"58e34ae7b5abfcc54f505ea8d57183d04f67120e"}},
+  0},
+ {<<"aesophia">>,
+  {git,"https://github.com/aeternity/aesophia.git",
+       {ref,"e3e35aa17ca57f82bc3053acadb055e5dc3c0fb7"}},
   0},
  {<<"base58">>,
   {git,"https://github.com/aeternity/erl-base58.git",
@@ -15,10 +23,12 @@
   {git,"https://github.com/ninenines/cowlib",
        {ref,"3ef5b48a028bb66f82b452c98ae515903096641c"}},
   1},
+ {<<"eblake2">>,{pkg,<<"eblake2">>,<<"1.0.0">>},1},
  {<<"enacl">>,
   {git,"https://github.com/aeternity/enacl.git",
        {ref,"26180f42c0b3a450905d2efd8bc7fd5fd9cece75"}},
   1},
+ {<<"getopt">>,{pkg,<<"getopt">>,<<"1.0.1">>},1},
  {<<"goldrush">>,{pkg,<<"goldrush">>,<<"0.1.9">>},1},
  {<<"gproc">>,{pkg,<<"gproc">>,<<"0.9.0">>},0},
  {<<"jsx">>,
@@ -39,9 +49,13 @@
   0}]}.
 [
 {pkg_hash,[
+ {<<"eblake2">>, <<"EC8AD20E438AAB3F2E8D5D118C366A0754219195F8A0F536587440F8F9BCF2EF">>},
+ {<<"getopt">>, <<"C73A9FA687B217F2FF79F68A3B637711BB1936E712B521D8CE466B29CBF7808A">>},
  {<<"goldrush">>, <<"F06E5D5F1277DA5C413E84D5A2924174182FB108DABB39D5EC548B27424CD106">>},
  {<<"gproc">>, <<"853CCB7805E9ADA25D227A157BA966F7B34508F386A3E7E21992B1B484230699">>}]},
 {pkg_hash_ext,[
+ {<<"eblake2">>, <<"3C4D300A91845B25D501929A26AC2E6F7157480846FAB2347A4C11AE52E08A99">>},
+ {<<"getopt">>, <<"53E1AB83B9CEB65C9672D3E7A35B8092E9BDC9B3EE80721471A161C10C59959C">>},
  {<<"goldrush">>, <<"99CB4128CFFCB3227581E5D4D803D5413FA643F4EB96523F77D9E6937D994CEB">>},
  {<<"gproc">>, <<"587E8AF698CCD3504CF4BA8D90F893EDE2B0F58CABB8A916E2BF9321DE3CF10B">>}]}
 ].

@@ -9,13 +9,14 @@
         , json_api/2
         ]).
 
--import(aeplugin_dev_mode_html, [html/1, meta/0]).
+-import(aeplugin_scm_html, [html/1, meta/0]).
 
 routes() ->
     [
      {'_', [ {"/", ?MODULE, []}
-           , {"/start/", ?MODULE, []}
-           , {"/stop/", ?MODULE, []}
+           , {"/connect_customer/", ?MODULE, []}
+           , {"/connect_merchant/", ?MODULE, []}
+           , {"/seed_accounts/", ?MODULE, []}
            , {"/status", ?MODULE, []}
            ]}
     ].
@@ -50,6 +51,7 @@ json_api(#{'$result' := Result, qs := Qs} = Req, State) ->
     {JSON, Req, State}.
 
 index_html(Req, State) ->
+    Balances = aeplugin_dev_mode_handler:account_balances(),
     HTML = html(
              {html,
               [{head, [meta(),
@@ -60,20 +62,110 @@ index_html(Req, State) ->
                       ]},
                {body,
                 [{a, #{href => <<"/">>}, <<"home">>},
+                 {h2, <<"Merchants">>},
+                 merchant_table(Balances),
+                 {h2, <<"Customers">>},
+                 customer_table(Balances),
                  {h2, <<"Actions">>},
-                 {a, #{href => <<"/start">>, method => get}, <<"Start server">>},
+                 {a, #{href => <<"/seed_accounts">>}, <<"Seed Accounts">>},
                  {p, []},
-                 {a, #{href => <<"/stop">>, method => get}, <<"Stop server">>},
-                 {p, []},
-                 {hr, []},
-                 {h3, <<"Chain:">>},
-                 {p, [<<"Top height: ">>, integer_to_binary(aec_chain:top_height())]},
-                 {p, [<<"Mempool size: ">>, integer_to_binary(aec_tx_pool:size())]},
-                 {h4, <<"Account balances">>},
-                 accounts_table()
+                 connect_customer_form(),
+                 connect_merchant_form()
+                 %% {a, #{href => <<"/start">>, method => get}, <<"Start server">>},
+                 %% {p, []},
+                 %% {a, #{href => <<"/stop">>, method => get}, <<"Stop server">>},
+                 %% {p, []},
+                 %% {hr, []},
+                 %% {h3, <<"Chain:">>},
+                 %% {p, [<<"Top height: ">>, integer_to_binary(aec_chain:top_height())]},
+                 %% {p, [<<"Mempool size: ">>, integer_to_binary(aec_tx_pool:size())]},
+                 %% {h4, <<"Account balances">>},
+                 %% accounts_table()
                 ]}
               ]}),
     {HTML, Req, State}.
+
+merchant_table(Balances) ->
+    Merchants = [{M,
+                  aeplugin_scm_registry:names_by_id(M),
+                  aeplugin_scm_registry:tags_by_id(M)}
+                 || M <- aeplugin_scm_registry:list_merchants()],
+    {table,
+     [{tr, [{th, <<"Id">>},
+            {th, <<"Name(s)">>},
+            {th, <<"Tags">>},
+            {th, <<"Balance">>}]}
+      | lists:map(
+          fun({M, Ns, Ts}) ->
+                  {account, PK} = aeser_id:specialize(M),
+                  EncPK = aeser_api_encoder:encode(account_pubkey, PK),
+                  {tr, [{td, aeplugin_scm_util:abbrev_key(EncPK)},
+                        {td, intersperse(Ns)},
+                        {td, intersperse(Ts)},
+                        {td, account_balance(PK, Balances)}]}
+          end, Merchants)]}.
+
+customer_table(Balances) ->
+    Customers = aeplugin_scm_registry:list_customers(),
+    {table,
+     [{tr, [{th, <<"Id">>},
+            {th, <<"Balance">>}]}
+      | lists:map(
+          fun(C) ->
+                  {account, PK} = aeser_id:specialize(C),
+                  EncPK = aeser_api_encoder:encode(account_pubkey, PK),
+                  {tr, [{td, aeplugin_scm_util:abbrev_key(EncPK)},
+                        {td, account_balance(PK, Balances)}]}
+          end, Customers)]}.
+
+connect_customer_form() ->
+    EncIds = lists:map(fun encode_id/1, available_ids()),
+    Options = [{option, #{value => Enc}, Enc} || Enc <- EncIds],
+    {form, #{action => <<"/connect_customer">>, method => get},
+     [{label, #{for => cid}, <<"Id: ">>},
+      {select, #{name => cid, id => cid}, Options},
+      {input, #{type => submit, value => <<"Connect Customer">>}, []}
+     ]}.
+
+connect_merchant_form() ->
+    EncIds = lists:map(fun encode_id/1, available_ids()),
+    Options = [{option, #{value => Enc}, Enc} || Enc <- EncIds],
+    {form, #{action => <<"/connect_merchant">>, method => get},
+     [{label, #{for => mid}, <<"Id: ">>},
+      {select, #{name => mid, id => mid}, Options},
+      {label, #{for => names}, <<"Names: ">>},
+      {input, #{type => text, id => names, name => names}, []},
+      {label, #{for => tags}, <<"Tags: ">>},
+      {input, #{type => text, id => tags, name => tags}, []},
+      {input, #{type => submit, value => <<"Connect Merchant">>}, []}
+     ]}.
+
+encode_id(Id) ->
+    {account, Pub} = aeser_id:specialize(Id),
+    aeser_api_encoder:encode(account_pubkey, Pub).
+
+available_ids() ->
+    Viable = viable_ids(),
+    [Id || Id <- Viable,
+           not customer_or_merchant(Id)].
+
+customer_or_merchant(Id) ->
+    (aeplugin_scm_registry:locate_customer(Id) =/= undefined)
+        orelse
+        (aeplugin_scm_registry:locate_merchant(Id) =/= undefined).
+
+viable_ids() ->
+    DemoPairs0 = aeplugin_dev_mode_handler:demo_keypairs(),
+    DemoPairs = lists:keydelete(
+                  aeplugin_scm_server:market_pubkey(), 1, DemoPairs0),
+    Priv = fun(Pub) ->
+                   proplists:get_value(Pub, DemoPairs, <<>>)
+           end,
+    Accts = [{Pub, Priv(Pub), Bal}
+             || {Pub, Bal} <- aeplugin_dev_mode_handler:account_balances(),
+                Bal > 100000000000000],
+    [aeser_id:create(account, Pu) || {Pu,Pr,_} <- Accts, Pr =/= <<>>].
+
 
 accounts_table() ->
     Balances = account_balances(),
@@ -115,8 +207,109 @@ account_balances() ->
 maybe_strong(true , Text) -> {strong, Text};
 maybe_strong(false, Text) -> Text.
 
-serve_request(#{path := <<"/emit_mb">>}) ->
-    aeplugin_dev_mode_emitter:emit_microblock();
+serve_request(#{path := <<"/connect_customer">>, qs := Qs}) ->
+    lager:debug("connect_customer", []),
+    Params = httpd:parse_query(Qs),
+    lager:debug("Params = ~p", [Params]),
+    case proplists:get_value(<<"cid">>, Params, undefined) of
+        undefined -> ok;
+        Id ->
+            {ok, CPub} = aeser_api_encoder:safe_decode(account_pubkey, Id),
+            CId = aeser_id:create(account, CPub),
+            lager:debug("CId = ~p", [CId]),
+            case lists:member(CId, available_ids()) of
+                true ->
+                    lager:debug("CId is available", []),
+                    KeyPairs = aeplugin_dev_mode_handler:demo_keypairs(),
+                    {PubK, PrivK} = lists:keyfind(CPub, 1, KeyPairs),
+                    {Host, Port} = aeplugin_scm_server:market_endpoint(),
+                    ChOpts = aeplugin_scm_util:channel_opts(
+                               initiator, #{pubkey => PubK,
+                                            privkey => PrivK},
+                               aeplugin_scm_server:market_pubkey()),
+                    aeplugin_scm_sc:initiate(Host, Port, ChOpts);
+                false ->
+                    lager:debug("CId (~p) NOT available", [CId]),
+                    ok
+            end
+    end;
+serve_request(#{path := <<"/connect_merchant">>, qs := Qs}) ->
+    lager:debug("connect_merchant", []),
+    Params = httpd:parse_query(Qs),
+    lager:debug("Params = ~p", [Params]),
+    case [proplists:get_value(K, Params, Default)
+          || {K, Default} <- [ {<<"mid">>, undefined}
+                             , {<<"names">>, <<>>}
+                             , {<<"tags">>, <<>>}]] of
+        [undefined | _] ->
+            lager:debug("No MId - ignoring", []),
+            ok;
+        [Id, NamesStr, TagsStr] ->
+            {ok, MPub} = aeser_api_encoder:safe_decode(account_pubkey, Id),
+            MId = aeser_id:create(account, MPub),
+            lager:debug("MId = ~p", [MId]),
+            case lists:member(MId, available_ids()) of
+                true ->
+                    lager:debug("MId available", []),
+                    KeyPairs = aeplugin_dev_mode_handler:demo_keypairs(),
+                    {PubK, PrivK} = lists:keyfind(MPub, 1, KeyPairs),
+                    {Host, Port} = aeplugin_scm_server:market_endpoint(),
+                    ChOpts = aeplugin_scm_util:channel_opts(
+                               initiator, #{pubkey => PubK,
+                                            privkey => PrivK},
+                               aeplugin_scm_server:market_pubkey()),
+                    Names = aeplugin_scm_util:split_words(NamesStr),
+                    Tags = aeplugin_scm_util:split_words(TagsStr),
+                    aeplugin_scm_sc:initiate(
+                      Host, Port,
+                      ChOpts#{register_as => #{names => Names,
+                                               tags => Tags}});
+                false ->
+                    lager:debug("MId NOT available (~p)", [MId]),
+                    ok
+            end
+    end;
+serve_request(#{path := <<"/seed_accounts">>}) ->
+    lager:debug("seed_accounts", []),
+    Amount = 10000000000000000,
+    DemoKeyPairs = demo_keypairs(),
+    aeplugin_dev_mode_emitter:emit_keyblocks(5),
+    Beneficiary = aec_headers:beneficiary(aec_chain:top_header()),
+    lager:debug("Beneficiary: ~p", [Beneficiary]),
+    {_, BPriv} = lists:keyfind(Beneficiary, 1, DemoKeyPairs),
+    lager:debug("Found beneficiary privkey", []),
+    Bals = aeplugin_dev_mode_handler:account_balances(),
+    lager:debug("Bals = ~p", [Bals]),
+    Pubs = lists:foldr(
+             fun({PK,_}, Acc) ->
+                     case lists:keyfind(PK, 1, Bals) of
+                         {_, Bal} when Bal > Amount ->
+                             Acc;
+                         _ ->
+                             [PK | Acc]
+                     end
+             end, [], DemoKeyPairs),
+    lager:debug("Pubs to spend to: ~p", [Pubs]),
+    {ok, Nonce} = aec_next_nonce:pick_for_account(Beneficiary),
+    lager:debug("next nonce: ~p", [Nonce]),
+    From = acct(Beneficiary),
+    lists:foldl(
+      fun(To, N) ->
+              {ok, Tx} = aec_spend_tx:new(#{sender_id => From,
+                                            recipient_id => acct(To),
+                                            amount => Amount,
+                                            nonce => N,
+                                            fee => 20000 * min_gas_price(),
+                                            ttl => 0,
+                                            payload => <<"scm_demo">>}),
+              lager:debug("Tx = ~p", [Tx]),
+              STx = sign_tx(Tx, BPriv),
+              lager:debug("Tx signed", []),
+              Res = aec_tx_pool:push(STx),
+              lager:info("Push Result = ~p", [Res]),
+              N+1
+      end, Nonce, Pubs),
+    ok;
 serve_request(#{path := <<"/auto_emit_mb">>, qs := Qs}) ->
     Params = httpd:parse_query(Qs),
     case {proplists:get_value(<<"auto_emit">>, Params, undefined),
@@ -330,3 +523,15 @@ encoded_top_hash(TopHdr) ->
 deterministic_keypair() ->
     #{public := PK, secret := SK} = enacl:sign_seed_keypair(<<"asdf">>),
     #{pubkey => PK, privkey => SK}.
+
+intersperse(L) ->
+    intersperse(L, <<", ">>).
+
+intersperse([H|T], Delim) ->
+    [H | [[Delim,X] || X <- T]];
+intersperse([], _) ->
+    [].
+
+account_balance(K, Balances) ->
+    integer_to_binary(proplists:get_value(K, Balances, 0)).
+
