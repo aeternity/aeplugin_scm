@@ -6,6 +6,7 @@
         , respond/3 ]).
 
 -export([ send_msg/3
+        , send_payment/4
         ]).
 
 -export([ close_mutual/1
@@ -56,7 +57,7 @@ send_msg(From, To, Msg) ->
     end.
 
 send_payment(From, To, Amount, Msg) when is_integer(Amount)
-                                         , Amount >= 0,
+                                         , Amount >= 0
                                          , is_binary(Msg) ->
     FromId = ensure_id(From),
     ToId = ensure_id(To),
@@ -108,16 +109,18 @@ start(Opts) ->
 init(Opts) ->
     start_channel(Opts).
 
-handle_call({pay, To, Amount, Msg}, _From, #{fsm := Fsm} = St) ->
-    HashLock = request_hashlock(my_id(St), pubkey(To), Amount, Msg),
-    foo;
+handle_call({pay, To, Amount, Msg}, _From, St) ->
+    HashLock = request_hashlock(pubkey(To), Amount, Msg, St),
+    _AbsTimeout = new_send(To, Amount, HashLock, St),
+    %% TODO: Save these values and be prepared to handle errors
+    {reply, {error, nyi}, St};
 handle_call(close_mutual, From, #{fsm := Fsm} = St) ->
     aesc_fsm:shutdown(Fsm, #{}),
     await_tx_to_sign(shutdown, St, ?TIMEOUT),
     gen_server:reply(From, ok),
     receive_on_chain_tx(channel_close_mutual_tx, close_mutual, St),
     {stop, normal, St};
-handle_call({send_msg, To, Msg}, _From, #{fsm := Fsm} = St) ->
+handle_call({send_msg, To, Msg}, _From, St) ->
     do_send_msg(To, Msg, St),
     {reply, ok, St};
 handle_call(_Rec, _From, St) ->
@@ -172,14 +175,22 @@ handle_info({aesc_fsm, Fsm, #{ tag  := message
                   handle_inband_msg(Dec, FromPub, St)
           end,
     {noreply, St1};
+handle_info({aesc_fsm, Fsm, #{ type := report
+                             , tag  := info
+                             , info := update } = Msg},
+            #{ fsm := Fsm} = St) ->
+    ae_scm:debug("UPDATE: ~p", [Msg]),
+    {noreply, St};
 handle_info({aesc_fsm, Fsm, #{ type := sign
                              , tag  := update_ack = Tag
                              , info := #{ signed_tx := _
                                         , updates := [Update]}} = Msg},
             #{fsm := Fsm} = St) ->
-    case {aesc_offchain_update:is_contract_create(Update), my_role(St)} of
-        {true, initiator} ->
-            #{ info := #{signed_tx := SignedTx} } = Msg,
+    ae_scm:debug("~s SIGN update_ack", [my_id(St)]),
+    #{info := #{signed_tx := SignedTx}} = Msg,
+    %% TODO: aesc_offchain_update lacks an API to simply get the update type
+    case {element(1, Update), my_role(St)} of
+        {create_contract, initiator} ->
             NewSignedTx = aeplugin_scm_signing:sign_tx(SignedTx, St),
             aesc_fsm:signing_response(Fsm, Tag, NewSignedTx),
             _Info = receive_report(update, St),
@@ -192,9 +203,20 @@ handle_info({aesc_fsm, Fsm, #{ type := sign
             ae_scm:debug("~s: Contract loaded (~s). Msgs: ~p",
                          [my_id(St), abbrev_enc(ContractPubkey),
                           msgs()]),
-            ContractMeta = aeplugin_scm_contract:contract_meta(),
+            #{ meta := ContractMeta
+             , abi_version := AbiVsn } =
+                aeplugin_scm_contract:contract_meta(),
+            put(contract_meta, ContractMeta),  %% annoying to keep in state
             {noreply, St#{ contract_id => ContractPubkey
-                         , contract_meta => ContractMeta }};
+                         , contract_abi_version => AbiVsn }};
+        {call_contract, responder} ->
+            ContractPubkey = aesc_offchain_update:extract_contract_pubkey(
+                               Update),
+            Call = aesc_offchain_update:extract_call(Update),
+            ae_scm:debug("Extracted call: ~p", [Call]),
+            NewSignedTx = aeplugin_scm_signing:sign_tx(SignedTx, St),
+            aesc_fsm:signing_response(Fsm, Tag, NewSignedTx),
+            {noreply, St};
         _ ->
             aesc_fsm:signing_response(Fsm, Tag, {error, ?ERR_FORBIDDEN}),
             {noreply, St}
@@ -358,7 +380,7 @@ receive_on_chain_tx(TxType, Info, #{fsm := Fsm} = St) ->
     end.
 
 await_tx_to_sign(Tag, #{fsm := Fsm} = St, Timeout) ->
-    ae_scm:debug("~p: awaiting ~p", [my_role(St), Tag]),
+    ae_scm:debug("~p: awaiting signing req (~p)", [my_role(St), Tag]),
     receive
         {aesc_fsm, Fsm, #{ type := sign
                          , tag  := Tag
@@ -436,6 +458,8 @@ maybe_load_contract(St) ->
             #{ contract_meta := ContractMeta
              , create_args   := CreateArgs} =
                 aeplugin_scm_contract:create_args(Enc),
+            #{abi_version := AbiVersion} = CreateArgs,
+            put(contract_meta, ContractMeta),  %% annoying to keep in state
             aesc_fsm:upd_create_contract(Fsm, CreateArgs),
             await_tx_to_sign(update, St, ?TIMEOUT),
             receive_report(update, St),
@@ -445,7 +469,7 @@ maybe_load_contract(St) ->
             ae_scm:debug("~s: Contract loaded (~s)",
                          [my_id(St), abbrev_enc(ContractPubkey)]),
             St#{ contract_id => ContractPubkey
-               , contract_meta => ContractMeta };
+               , contract_abi_version => AbiVersion };
         _ ->
             St
     end.
@@ -464,6 +488,14 @@ pubkey(Id) ->
             error(invalid_pubkey)
     end.
 
+ensure_id(X) ->
+    case aeser_id:is_id(X) of
+        true ->
+            X;
+        false ->
+            aeser_id:create(account, pubkey(X))
+    end.
+
 my_priv(#{privkey := Priv}) ->
     Priv.
 
@@ -471,10 +503,9 @@ do_send_msg(To, Msg, #{fsm := Fsm} = St) ->
     ae_scm:info("SND MSG: ~s -> ~s - ~s", [my_id(St), abbrev_enc(To),
                                             truncate(Msg)]),
     Encrypted = encrypt_msg(Msg, pubkey(To), St),
-    aesc_fsm:inband_msg(Fsm, To, Encrypted),
+    aesc_fsm:inband_msg(Fsm, To, Encrypted).
 
-
-request_hashlock(From, To, Amount, Msg, St) ->
+request_hashlock(To, Amount, Msg, St) ->
     Seq = erlang:unique_integer([positive, monotonic]),
     Req = #{ <<"req">> => <<"SEND">>
            , <<"id">>  => Seq
@@ -483,7 +514,8 @@ request_hashlock(From, To, Amount, Msg, St) ->
     do_send_msg(To, jsx:encode(Req), St),
     #{ <<"reply">> := <<"OK">>
      , <<"id">> := Seq
-     , <<"hash_lock">> := HashLockEnc } = receive_and_decrypt_msg(To, St),
+     , <<"hash_lock">> := HashLockEnc } =
+        try_jsx_decode(receive_and_decrypt_msg(To, St)),
     {ok, HashLock} = aeser_api_encoder:safe_decode(bytearray, HashLockEnc),
     HashLock.
 
@@ -507,6 +539,13 @@ receive_and_decrypt_msg(From, #{fsm := Fsm} = St) ->
             Decrypted
     after ?LONG_TIMEOUT ->
             {error, {timeout, receive_inband_msg}}
+    end.
+
+try_jsx_decode(Msg) ->
+    try jsx:decode(Msg, [return_maps])
+    catch
+        error:_ ->
+            Msg
     end.
 
 handle_inband_msg(Msg, From, St) ->
@@ -533,3 +572,48 @@ handle_request(#{ <<"req">> := <<"SEND">>
                                 , amount => Amount
                                 , msg => Msg } },
     St#{requests => Reqs}.
+
+new_send(To, Amount, HashLock, St) ->
+    Fee = aeplugin_scm_contract:fee(),
+    Timeout = aeplugin_scm_contract:timeout(),
+    {ok, {integer, AbsTimeout}} =
+        contract_call(
+          <<"new_send">>, [Amount, To, Fee, Timeout, HashLock],
+          Amount + Fee, St),
+    AbsTimeout.
+
+contract_call(F, Args, Amount, St) ->
+    #{ fsm := Fsm
+     , contract_id := ContractId
+     , contract_abi_version := AbiVsn } = St,
+    Meta = get(contract_meta),
+    {ok, CallData} = aefa_fate_code:encode_calldata(
+                       maps:get(fate_code, Meta), F, Args),
+    CallArgs = #{ contract      => ContractId
+                , abi_version   => AbiVsn
+                , amount        => Amount
+                , call_data     => CallData
+                , return_result => true },
+    {ok, CallRes} = aesc_fsm:upd_call_contract(Fsm, CallArgs),
+    await_tx_to_sign(update, St, ?TIMEOUT),
+    receive_report(update, St),
+    decode_callres(CallRes, F, Meta).
+
+%% caller_and_validator(#{ opts := #{role := Role}
+%%                       , ids := #{ initiator := I
+%%                                 , responder := R}}) ->
+%%     Ki = pubkey(I), Kr = pubkey(R),
+%%     case Role of
+%%         initiator -> {Ki, Kr};
+%%         responder -> {Kr, Ki}
+%%     end.
+            
+%% NOTE: the `unit' data type comes back as `{{tuple, []}, {tuple, {}}}'
+%%
+decode_callres({ok, Value}, F, Meta) ->
+    ae_scm:debug("Return (~s) = ~p", [F, Value]),
+    {ok, aefa_fate_code:decode_result(maps:get(fate_code, Meta), F, Value)};
+decode_callres({error, Reason}, _, _) ->
+    {error, Reason};
+decode_callres({revert, Reason}, _F, _Meta) ->
+    {error, aeb_fate_encoding:deserialize(Reason)}.

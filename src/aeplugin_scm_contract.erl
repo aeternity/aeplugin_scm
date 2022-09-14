@@ -5,6 +5,9 @@
         , create_args/1
         , create_args/4 ]).
 
+-export([ fee/0
+        , timeout/0 ]).
+
 -export([ start_link/0
         , init/1
         , handle_call/3
@@ -23,9 +26,11 @@
 -define(VM_FATE_SOPHIA_3, 16#08).
 
 contract_meta() ->
-    #{contract_meta := ContractMeta} =
+    #{ contract_meta := ContractMeta
+     , create_args := #{abi_version := AbiVersion} } =
         gen_server:call(?MODULE, get_contract),
-    ContractMeta.
+    #{ meta => ContractMeta
+     , abi_version => AbiVersion }.
 
 create_args(EncodedPub) ->
     create_args(EncodedPub, ?MINIMUM_FEE, ?DEFAULT_TIMEOUT, ?DEPOSIT).
@@ -39,6 +44,12 @@ create_args(EncodedPub, Fee, Timeout, Deposit) ->
                        <<"init">>, [EncodedPub, Fee, Timeout]),
     Meta#{ create_args := CreateArgs0#{ deposit => Deposit
                                       , call_data => CallData } }.
+
+fee() ->
+    ?MINIMUM_FEE.
+
+timeout() ->
+    ?DEFAULT_TIMEOUT.
 
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
