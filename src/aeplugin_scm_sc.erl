@@ -7,6 +7,7 @@
 
 -export([ send_msg/3
         , send_payment/4
+        , get_balances/1
         ]).
 
 -export([ close_mutual/1
@@ -30,6 +31,8 @@
 
 -define(ERR_USER, 128).   % from aesc_codec.hrl
 -define(ERR_FORBIDDEN, ?ERR_USER + 1).
+-define(ERR_NOT_FOUND, ?ERR_USER + 2).
+-define(ERR_UNKNOWN, ?ERR_USER + 3).
 
 %% crypto:strong_rand_bytes(enacl:box_NONCEBYTES())
 -define(NONCE, <<171,200,46,25,40,23,177,61,66,168,47,183,
@@ -70,6 +73,9 @@ send_payment(From, To, Amount, Msg) when is_integer(Amount)
         {Pid, _} ->
             gen_server:call(Pid, {pay, ToId, Amount, Msg})
     end.
+
+get_balances(Pid) when is_pid(Pid) ->
+    gen_server:call(Pid, get_balances).
 
 %% not exported
 forward_msg(From, To, Msg) ->
@@ -112,8 +118,13 @@ init(Opts) ->
 handle_call({pay, To, Amount, Msg}, _From, St) ->
     HashLock = request_hashlock(pubkey(To), Amount, Msg, St),
     _AbsTimeout = new_send(To, Amount, HashLock, St),
-    %% TODO: Save these values and be prepared to handle errors
-    {reply, {error, nyi}, St};
+    Res = await_contract_call(<<"collect">>, St),
+    {reply, Res, St};
+handle_call(get_balances, From, #{fsm := Fsm} = St) ->
+    IPub = initiator_pub(St),
+    RPub = responder_pub(St),
+    {ok, [{IPub,Bi},{RPub,Br}]} = aesc_fsm:get_balances(Fsm, [IPub, RPub]),
+    {reply, {Bi, Br}, St};
 handle_call(close_mutual, From, #{fsm := Fsm} = St) ->
     aesc_fsm:shutdown(Fsm, #{}),
     await_tx_to_sign(shutdown, St, ?TIMEOUT),
@@ -130,7 +141,7 @@ handle_cast({forward_msg, From, To, Msg}, #{fsm := Fsm} = St) ->
     case my_role(St) of
         responder ->
             %% Don't touch the message
-            ae_scm:info("~s: FWD MSG: ~s -> ~s - ~s", [my_id(St),
+            ae_scm:info("~s: FWD MSG: ~s -> ~s - ~s", [my_nick(St),
                                                        abbrev_enc(From),
                                                        abbrev_enc(To),
                                                        truncate(Msg)]),
@@ -143,6 +154,9 @@ handle_cast({forward_msg, From, To, Msg}, #{fsm := Fsm} = St) ->
 handle_cast(_Msg, St) ->
     {noreply, St}.
 
+handle_info({fwd_call, F, Args, Deposit}, St) ->
+    contract_call(F, Args, Deposit, St),
+    {noreply, St};
 handle_info({aesc_fsm, Fsm, #{ tag  := message
                              , type := report
                              , notice := Notice } = Msg}, #{fsm := Fsm} = St) ->
@@ -155,7 +169,7 @@ handle_info({aesc_fsm, Fsm, #{ tag  := message
                   case aeplugin_scm_registry:locate_endpoint(ToId) of
                       Pid when Pid =/= self() ->
                           ae_scm:debug("~s: FWD MSG ~s -> ~s - ~s",
-                                       [my_id(St), abbrev_enc(FromPub),
+                                       [my_nick(St), abbrev_enc(FromPub),
                                         abbrev_enc(ToPub),
                                         truncate(Info)]),
                           forward_msg(aeser_id:create(account, FromPub),
@@ -169,7 +183,7 @@ handle_info({aesc_fsm, Fsm, #{ tag  := message
                              , to := ToPub
                              , info := Info}} = Msg,
                   {ok, Dec} = decrypt_msg(Info, FromPub, St),
-                  ae_scm:debug("~s: MSG ~s -> ~s: ~s", [my_id(St),
+                  ae_scm:debug("~s: MSG ~s -> ~s: ~s", [my_nick(St),
                                                         abbrev_enc(FromPub),
                                                         abbrev_enc(ToPub), Dec]),
                   handle_inband_msg(Dec, FromPub, St)
@@ -183,17 +197,14 @@ handle_info({aesc_fsm, Fsm, #{ type := report
     {noreply, St};
 handle_info({aesc_fsm, Fsm, #{ type := sign
                              , tag  := update_ack = Tag
-                             , info := #{ signed_tx := _
+                             , info := #{ signed_tx := SignedTx
                                         , updates := [Update]}} = Msg},
             #{fsm := Fsm} = St) ->
-    ae_scm:debug("~s SIGN update_ack", [my_id(St)]),
-    #{info := #{signed_tx := SignedTx}} = Msg,
+    ae_scm:debug("~s SIGN update_ack", [my_nick(St)]),
     %% TODO: aesc_offchain_update lacks an API to simply get the update type
     case {element(1, Update), my_role(St)} of
         {create_contract, initiator} ->
-            NewSignedTx = aeplugin_scm_signing:sign_tx(SignedTx, St),
-            aesc_fsm:signing_response(Fsm, Tag, NewSignedTx),
-            _Info = receive_report(update, St),
+            sign_and_respond(Tag, SignedTx, St),
             %% We should perhaps extract the current round from the
             %% received offchain tx...
             {ok, Round} = aesc_fsm:get_round(Fsm),
@@ -201,7 +212,7 @@ handle_info({aesc_fsm, Fsm, #{ type := sign
             ContractPubkey = aect_contracts:compute_contract_pubkey(
                                Owner, Round),
             ae_scm:debug("~s: Contract loaded (~s). Msgs: ~p",
-                         [my_id(St), abbrev_enc(ContractPubkey),
+                         [my_nick(St), abbrev_enc(ContractPubkey),
                           msgs()]),
             #{ meta := ContractMeta
              , abi_version := AbiVsn } =
@@ -212,11 +223,40 @@ handle_info({aesc_fsm, Fsm, #{ type := sign
         {call_contract, responder} ->
             ContractPubkey = aesc_offchain_update:extract_contract_pubkey(
                                Update),
-            Call = aesc_offchain_update:extract_call(Update),
-            ae_scm:debug("Extracted call: ~p", [Call]),
+            {Fun, Args} = extract_and_decode_call_data(Update),
             NewSignedTx = aeplugin_scm_signing:sign_tx(SignedTx, St),
             aesc_fsm:signing_response(Fsm, Tag, NewSignedTx),
+            %% TODO: we really need to also inspect the call results
+            forward_contract_call(Fun, Args, St),
             {noreply, St};
+        {call_contract, initiator} ->
+            ae_scm:debug("~s CONTRACT_CALL to initiator", [my_nick(St)]),
+            case extract_and_decode_call_data(Update) of
+                {<<"new_receive">>, [Amount, {address, FromPub},
+                                     AbsTimeout, {bytes, HashLock}]} ->
+                    ae_scm:debug("~s NEW_RCV (~p, ~s, ...)", [my_nick(St),
+                                                              Amount,
+                                                              abbrev_enc(FromPub)]),
+                    case St of
+                        #{requests := #{HashLock := #{ from := FromPub
+                                                     , amount := Amount
+                                                     , secret := Secret }} = Reqs} ->
+                            ae_scm:debug("~s FOUND transaction", [my_nick(St)]),
+                            sign_and_respond(Tag, SignedTx, St),
+                            {ok, _} =
+                                contract_call(
+                                  <<"receive">>,
+                                  [FromPub, Amount, HashLock, Secret],
+                                  0, St),
+                            {noreply, St#{requests => maps:remove(HashLock, Reqs)}};
+                        _ ->
+                            aesc_fsm:signing_response(Fsm, Tag, {error, ?ERR_NOT_FOUND}),
+                            {noreply, St}
+                    end;
+                _ ->
+                    aesc_fsm:signing_response(Fsm, Tag, {error, ?ERR_UNKNOWN}),
+                    {noreply, St}
+            end;
         _ ->
             aesc_fsm:signing_response(Fsm, Tag, {error, ?ERR_FORBIDDEN}),
             {noreply, St}
@@ -319,12 +359,18 @@ finalize_channel_setup(St0) ->
     receive_report(update, St),
     aeplugin_scm_registry:register_session(St),
     St1 = maybe_load_contract(St),
-    ae_scm:debug("~p: channel open (~s)", [my_role(St1), my_id(St1)]),
+    ae_scm:debug("~p: channel open (~s)", [my_role(St1), my_nick(St1)]),
     ae_scm:debug("~p: msgQ: ~p", [my_role(St1), msgs()]),
     St1.
 
 get_opt(Key, #{opts := Opts}) ->
     maps:get(Key, Opts, undefined).
+
+sign_and_respond(Tag, SignedTx, #{fsm := Fsm} = St) ->
+    NewSignedTx = aeplugin_scm_signing:sign_tx(SignedTx, St),
+    aesc_fsm:signing_response(Fsm, Tag, NewSignedTx),
+    _Info = receive_report(update, St),
+    ok.
 
 receive_info_report(Info, St) ->
     receive_info_report(Info, St, ?TIMEOUT).
@@ -409,12 +455,21 @@ dbg(_Line, _X) ->
 my_role(#{opts := #{role := Role}}) ->
     Role.
 
-my_id(#{opts := #{role := Role, initiator := I, responder := R}}) ->
-    K = case Role of
-            initiator -> I;
-            responder -> R
-        end,
-    abbrev_enc(K).
+my_nick(St) ->
+    abbrev_enc(my_pub(St)).
+
+my_pub(#{opts := #{role := Role} = Opts}) ->
+    maps:get(Role, Opts).
+
+my_id(#{opts := #{role := Role}, ids := Ids}) ->
+    maps:get(Role, Ids).
+
+initiator_pub(#{ids := #{initiator := IId}}) ->
+    {account, Pub} = aeser_id:specialize(IId),
+    Pub.
+
+responder_pub(#{opts := #{responder := R}}) ->
+    R.
 
 abbrev_enc(K) ->
     Enc = aeser_api_encoder:encode(account_pubkey, K),
@@ -467,7 +522,7 @@ maybe_load_contract(St) ->
             ContractPubkey = aect_contracts:compute_contract_pubkey(
                                Owner, Round0 + 1),
             ae_scm:debug("~s: Contract loaded (~s)",
-                         [my_id(St), abbrev_enc(ContractPubkey)]),
+                         [my_nick(St), abbrev_enc(ContractPubkey)]),
             St#{ contract_id => ContractPubkey
                , contract_abi_version => AbiVersion };
         _ ->
@@ -500,7 +555,7 @@ my_priv(#{privkey := Priv}) ->
     Priv.
 
 do_send_msg(To, Msg, #{fsm := Fsm} = St) ->
-    ae_scm:info("SND MSG: ~s -> ~s - ~s", [my_id(St), abbrev_enc(To),
+    ae_scm:info("SND MSG: ~s -> ~s - ~s", [my_nick(St), abbrev_enc(To),
                                             truncate(Msg)]),
     Encrypted = encrypt_msg(Msg, pubkey(To), St),
     aesc_fsm:inband_msg(Fsm, To, Encrypted).
@@ -566,11 +621,11 @@ handle_request(#{ <<"req">> := <<"SEND">>
                 , <<"id">> := Id
                 , <<"amount">> := Amount
                 , <<"msg">> := Msg }, From, St) ->
-    Params = send_hashlock_reply(Id, From, St),
+    #{hash_lock := HashLock} = Params = send_hashlock_reply(Id, From, St),
     Reqs0 = maps:get(requests, St, #{}),
-    Reqs = Reqs0#{ Id => Params#{ from => From
-                                , amount => Amount
-                                , msg => Msg } },
+    Reqs = Reqs0#{ HashLock => Params#{ from => From
+                                      , amount => Amount
+                                      , msg => Msg } },
     St#{requests => Reqs}.
 
 new_send(To, Amount, HashLock, St) ->
@@ -599,6 +654,50 @@ contract_call(F, Args, Amount, St) ->
     receive_report(update, St),
     decode_callres(CallRes, F, Meta).
 
+await_contract_call(F, #{fsm := Fsm} = St) ->
+    receive
+        {aesc_fsm, Fsm, #{ type := sign
+                         , tag  := update_ack = Tag
+                         , info := #{ signed_tx := SignedTx
+                                    , updates := [Update]}} = Msg}
+          when element(1, Update) =:= call_contract ->
+            CallData = aesc_offchain_update:extract_call_data(Update),
+            {F, Args} = fate_code_decode_call_data(CallData),
+            NewSignedTx = aeplugin_scm_signing:sign_tx(SignedTx, St),
+            aesc_fsm:signing_response(Fsm, Tag, NewSignedTx),
+            _ = receive_report(update, St),
+            ok
+    after ?TIMEOUT ->
+            error({timeout, {await_contract_call, F}})
+    end.
+
+forward_contract_call(F, Args, St) ->
+    forward_contract_call(F, Args, my_role(St), St).
+
+forward_contract_call(<<"new_send">>, Args, responder, St) ->
+    [Amount, {address, ToPub}, Fee, Timeout, {bytes, HashLock}] = Args,
+    ToId = aeser_id:create(account, ToPub),
+    %% TODO: AbsTimeout is supposed to be taken from the return value of new_send()
+    AbsTimeout = aec_chain:top_height() + Timeout,
+    IPub = initiator_pub(St),
+    try_forward_call(ToId, <<"new_receive">>,
+                     [Amount, IPub, AbsTimeout, HashLock], Amount);
+forward_contract_call(<<"receive">>, Args, responder, St) ->
+    [{address, FromPub}, Amount, {bytes, HashLock}, {bytes, Secret}] = Args,
+    FromId = aeser_id:create(account, FromPub),
+    IPub = initiator_pub(St),
+    try_forward_call(FromId, <<"collect">>,
+                     [IPub, Amount, HashLock, Secret], 0).
+
+try_forward_call(ToId, F, Args, Deposit) ->
+    case aeplugin_scm_registry:locate_market_side(ToId) of
+        undefined ->
+            ae_scm:debug("Cannot forward ~s call to ~s",
+                         [F, abbrev_enc(pubkey(ToId))]);
+        Pid ->
+            Pid ! {fwd_call, F, Args, Deposit}
+    end.
+
 %% caller_and_validator(#{ opts := #{role := Role}
 %%                       , ids := #{ initiator := I
 %%                                 , responder := R}}) ->
@@ -607,13 +706,28 @@ contract_call(F, Args, Amount, St) ->
 %%         initiator -> {Ki, Kr};
 %%         responder -> {Kr, Ki}
 %%     end.
-            
+
 %% NOTE: the `unit' data type comes back as `{{tuple, []}, {tuple, {}}}'
 %%
 decode_callres({ok, Value}, F, Meta) ->
-    ae_scm:debug("Return (~s) = ~p", [F, Value]),
     {ok, aefa_fate_code:decode_result(maps:get(fate_code, Meta), F, Value)};
 decode_callres({error, Reason}, _, _) ->
     {error, Reason};
 decode_callres({revert, Reason}, _F, _Meta) ->
     {error, aeb_fate_encoding:deserialize(Reason)}.
+
+extract_and_decode_call_data(Update) ->
+    CallData = aesc_offchain_update:extract_call_data(Update),
+    {_Fun, _Args} = fate_code_decode_call_data(CallData).
+
+%% TODO: Provide a generalized version in aefa_fate_code.erl
+%%
+fate_code_decode_call_data(CallData) ->
+    {tuple, {Hash, {tuple, Args}}} =
+        aeb_fate_encoding:deserialize(CallData),
+    ContractMeta = get(contract_meta),
+    FateCode = maps:get(fate_code, ContractMeta),
+    Fname = maps:get(Hash, aeb_fate_code:symbols(FateCode)),
+    Decoded = {Fname, tuple_to_list(Args)},
+    ae_scm:debug("Decoded = ~p", [Decoded]),
+    Decoded.

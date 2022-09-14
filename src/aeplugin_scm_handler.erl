@@ -66,6 +66,8 @@ index_html(Req, State) ->
                  merchant_table(Balances),
                  {h2, <<"Customers">>},
                  customer_table(Balances),
+                 {p, []},
+                 {p, [], <<"Total Market Balance: ", (total_market_balance())/binary>>},
                  {h2, <<"Actions">>},
                  {a, #{href => <<"/seed_accounts">>}, <<"Seed Accounts">>},
                  {p, []},
@@ -85,6 +87,14 @@ index_html(Req, State) ->
               ]}),
     {HTML, Req, State}.
 
+total_market_balance() ->
+    Sum = lists:foldl(
+            fun(Pid, Acc) ->
+                    {_, Bal} = aeplugin_scm_sc:get_balances(Pid),
+                    Bal + Acc
+            end, 0, aeplugin_scm_registry:market_responder_pids()),
+    integer_to_binary(Sum).
+
 merchant_table(Balances) ->
     Merchants = [{M,
                   aeplugin_scm_registry:names_by_id(M),
@@ -94,28 +104,46 @@ merchant_table(Balances) ->
      [{tr, [{th, <<"Id">>},
             {th, <<"Name(s)">>},
             {th, <<"Tags">>},
-            {th, <<"Balance">>}]}
+            {th, <<"On-Chain Bal">>},
+            {th, <<"Channel Bal">>},
+            {th, <<"Market Bal">>}]}
       | lists:map(
           fun({M, Ns, Ts}) ->
-                  {account, PK} = aeser_id:specialize(M),
-                  EncPK = aeser_api_encoder:encode(account_pubkey, PK),
-                  {tr, [{td, aeplugin_scm_util:abbrev_key(EncPK)},
-                        {td, intersperse(Ns)},
-                        {td, intersperse(Ts)},
-                        {td, account_balance(PK, Balances)}]}
+                  case aeplugin_scm_registry:locate_endpoint(M) of
+                      undefined -> [];
+                      Pid ->
+                          {account, PK} = aeser_id:specialize(M),
+                          EncPK = aeser_api_encoder:encode(account_pubkey, PK),
+                          {Bi, Br} = aeplugin_scm_sc:get_balances(Pid),
+                          {tr, [{td, aeplugin_scm_util:abbrev_key(EncPK)},
+                                {td, intersperse(Ns)},
+                                {td, intersperse(Ts)},
+                                {td, account_balance(PK, Balances)},
+                                {td, integer_to_binary(Bi)},
+                                {td, integer_to_binary(Br)}]}
+                  end
           end, Merchants)]}.
 
 customer_table(Balances) ->
     Customers = aeplugin_scm_registry:list_customers(),
     {table,
      [{tr, [{th, <<"Id">>},
-            {th, <<"Balance">>}]}
+            {th, <<"On-Chain Bal">>},
+            {th, <<"Channel Bal">>},
+            {th, <<"Market, Bal">>}]}
       | lists:map(
           fun(C) ->
-                  {account, PK} = aeser_id:specialize(C),
-                  EncPK = aeser_api_encoder:encode(account_pubkey, PK),
-                  {tr, [{td, aeplugin_scm_util:abbrev_key(EncPK)},
-                        {td, account_balance(PK, Balances)}]}
+                  case aeplugin_scm_registry:locate_endpoint(C) of
+                      undefined -> [];
+                      Pid ->
+                          {account, PK} = aeser_id:specialize(C),
+                          EncPK = aeser_api_encoder:encode(account_pubkey, PK),
+                          {Bi, Br} = aeplugin_scm_sc:get_balances(Pid),
+                          {tr, [{td, aeplugin_scm_util:abbrev_key(EncPK)},
+                                {td, account_balance(PK, Balances)},
+                                {td, integer_to_binary(Bi)},
+                                {td, integer_to_binary(Br)}]}
+                  end
           end, Customers)]}.
 
 connect_customer_form() ->

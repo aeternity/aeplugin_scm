@@ -6,6 +6,7 @@
 
 -export([ list_merchants/0
         , list_customers/0
+        , market_responder_pids/0
 	, tags_by_id/1
 	, names_by_id/1
 	, customers_by_merchant_id/1
@@ -85,6 +86,10 @@ list_merchants() ->
 list_customers() ->
     gproc:select(
       {l,n}, [{ {{n,l,{?MODULE, customer, '$1'}}, '_', '_'}, [], ['$1'] }]).
+
+market_responder_pids() ->
+    gproc:select(
+      {l,n}, [{ {{n,l,{?MODULE, market_side, '_'}}, '$1', '_'}, [], ['$1'] }]).
 
 tags_by_id(Id) ->
     gproc:select({l,p}, [{ {{p,l,{?MODULE, tag, '$1'}}, '_', Id}, [], ['$1'] }]).
