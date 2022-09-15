@@ -5,7 +5,7 @@
   {registered, []},
   {mod, {aeplugin_scm_app, []}},
   {start_phases, [{check_config, []}]},
-  {applications, [kernel, stdlib, aecore, aechannel]},
+  {applications, [kernel, stdlib, aecore, aecontract, aechannel, aesophia]},
   {env,
    [{'$setup_hooks',
      [{normal,

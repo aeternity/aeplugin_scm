@@ -13,13 +13,16 @@ init([]) ->
     SupFlags = #{ strategy  => one_for_one
                 , intensity => 3
                 , period    => 60 },
-    Server = aeplugin_scm_server,
     {ok, {SupFlags,
           [
-           #{ id       => Server
-            , start    => {Server, start_link, []}
-            , restart  => permanent
-            , shutdown => 2000
-            , type     => worker
-            , modules  => [Server] }
+           childspec(aeplugin_scm_contract),
+           childspec(aeplugin_scm_server)
           ]}}.
+
+childspec(Server) ->
+    #{ id       => Server
+     , start    => {Server, start_link, []}
+     , restart  => permanent
+     , shutdown => 2000
+     , type     => worker
+     , modules  => [Server] }.

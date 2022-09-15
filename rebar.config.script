@@ -15,14 +15,26 @@ AERoot = fun() ->
                  end
          end.
 
+GetAeDeps = fun(Root) ->
+                    AeCfg = rebar_config:consult(Root),
+                    Deps = proplists:get_value(deps, AeCfg, []),
+                    TestDeps = proplists:get_value(
+                                 deps,
+                                 proplists:get_value(
+                                   test,
+                                   proplists:get_value(
+                                     profiles, AeCfg, []),
+                                   []),
+                                 []),
+                    Deps ++ TestDeps
+            end.
+
 case AERoot() of
     undefined ->
         CONFIG;
     Root ->
         MyDeps = proplists:get_value(deps, CONFIG, []),
-        AeDeps = proplists:get_value(
-                   deps,
-                   rebar_config:consult(Root)),
+        AeDeps = GetAeDeps(Root),
         MyDeps1 =
             lists:map(
               fun(A) when is_atom(A) ->

@@ -4,6 +4,9 @@
 
 -export([ start_link/0 ]).
 
+-export([ market_pubkey/0
+        , market_endpoint/0 ]).
+
 -export([ init/1
         , handle_call/3
         , handle_cast/2
@@ -19,17 +22,31 @@
             , port = ?PORT
             , sessions = [] }).
 
+%%% Currently, we cheat and use the demo patron keypair as the hard-coded
+%%% Market pubkey. TODO: Make configurable
+
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+market_pubkey() ->
+    #{pubkey := Pub} = market_keypair(),
+    Pub.
+
+market_endpoint() ->
+    {?HOST, ?PORT}.
+
+market_keypair() ->
+    %% TODO: make configurable
+    aecore_env:patron_keypair_for_testing().
 
 init([]) ->
     %% TODO: Make configurable, of course
     jobs:add_queue(?MODULE, [ {producer, fun job_init/0}
                             , {standard_counter, 10} ]),
-    #{pubkey := Pub} = KP = aecore_env:patron_keypair_for_testing(),
-    Id = aeser_id:create(account, Pub),
-    aeplugin_scm_registry:register_merchant(Id, [<<"demo_merchant">>], [<<"coffee">>, <<"deli">>]),
-    ChOpts = channel_opts(KP),
+    KP = market_keypair(),
+    aeplugin_scm_registry:create_chat_group(<<"SCM">>),
+    %% Id = aeser_id:create(account, Pub),
+    ChOpts = aeplugin_scm_util:channel_opts(responder, KP, any),
     {ok, #st{ channel_opts = ChOpts }}.
 
 handle_call(get_channel_opts, _From, #st{ channel_opts = ChOpts
@@ -56,16 +73,3 @@ job_init() ->
 
 get_channel_opts() ->
     gen_server:call(?MODULE, get_channel_opts).
-
-%%
-channel_opts(#{pubkey := PubKey} = KeyPair) ->
-    Sign = aeplugin_scm_signing:verify_signing_config(KeyPair),
-    #{ sign => Sign
-     , channel_reserve => 100000000000000
-     , initiator => any
-     , initiator_amount => 1000000000000000
-     , lock_period => 10
-     , noise => [{noise,<<"Noise_NN_25519_ChaChaPoly_BLAKE2b">>}]
-     , push_amount => 0
-     , responder => PubKey
-     , responder_amount => 1000000000000000 }.
