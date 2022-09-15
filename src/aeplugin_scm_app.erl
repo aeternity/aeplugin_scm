@@ -13,6 +13,7 @@
 -define(SCHEMA_FNAME, "aeplugin_scm_config_schema.json").
 -define(OS_ENV_PFX, "AESCM").
 -define(LAGER_SINK, ae_scm_lager_event).
+-define(LAGER_CHAT_SINK, ae_scm_chat_lager_event).
 
 start(_Type, _Args) ->
     create_lager_sinks(),
@@ -36,21 +37,29 @@ check_env() ->
     ok.
 
 create_lager_sinks() ->
-    case lists:member(?LAGER_SINK, lager:list_all_sinks()) of
+    create_lager_sink(?LAGER_SINK),
+    create_lager_sink(?LAGER_CHAT_SINK).
+
+create_lager_sink(Sink) ->
+    case lists:member(Sink, lager:list_all_sinks()) of
         true ->
             ok;
         false ->
+            Fname = sink_file_name(Sink),
             lager_app:configure_sink(
-              ?LAGER_SINK, [{handlers,
-                             [{lager_file_backend,
-                               [{file, "ae_scm.log"},
-                                {level, debug},
-                                {size, 4194303},
-                                {date, "$D0"},
-                                {count, 3}]}
-                             ]}
-                            ])
+              Sink, [{handlers,
+                      [{lager_file_backend,
+                        [{file, Fname},
+                         {level, debug},
+                         {size, 4194303},
+                         {date, "$D0"},
+                         {count, 3}]}
+                      ]}
+                    ])
     end.
+
+sink_file_name(?LAGER_SINK) -> "ae_scm.log";
+sink_file_name(?LAGER_CHAT_SINK) -> "ae_scm_chat.log".
 
 start_http_api() ->
     Port = get_http_api_port(),

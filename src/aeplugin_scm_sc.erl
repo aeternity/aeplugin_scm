@@ -5,7 +5,9 @@
 -export([ initiate/3
         , respond/3 ]).
 
--export([ send_msg/3
+-export([ chat/3
+        , group_chat/3
+        , send_msg/3
         , send_payment/4
         , get_balances/1
         ]).
@@ -49,6 +51,20 @@ respond(Host, Port, Opts) when is_map(Opts) ->
     start(#{ host => Host
            , port => Port
            , opts => apply_defaults(responder, Opts) }).
+
+chat(From, To, Msg) ->
+    send_msg(From, To, jsx:encode(#{<<"chat">> => Msg})).
+
+group_chat(From, Group, Text) ->
+    Members = aeplugin_scm_registry:chat_group_members(Group, From),
+    case lists:member(From, Members) of
+        true ->
+            Msg = jsx:encode(#{<<"chat">> => Text, <<"group">> => Group}),
+            [send_msg(From, To, Msg) || To <- Members -- [From]],
+            ok;
+        false ->
+            {error, not_member}
+    end.
 
 send_msg(From, To, Msg) ->
     case aeplugin_scm_registry:locate_endpoint(From) of
@@ -186,7 +202,7 @@ handle_info({aesc_fsm, Fsm, #{ tag  := message
                   ae_scm:debug("~s: MSG ~s -> ~s: ~s", [my_nick(St),
                                                         abbrev_enc(FromPub),
                                                         abbrev_enc(ToPub), Dec]),
-                  handle_inband_msg(Dec, FromPub, St)
+                  handle_inband_msg(Dec, FromPub, ToPub, St)
           end,
     {noreply, St1};
 handle_info({aesc_fsm, Fsm, #{ type := report
@@ -603,11 +619,16 @@ try_jsx_decode(Msg) ->
             Msg
     end.
 
-handle_inband_msg(Msg, From, St) ->
+handle_inband_msg(Msg, From, To, St) ->
     try jsx:decode(Msg, [return_maps]) of
         #{ <<"req">> := _
          , <<"id">>  := _ } = Request ->
             handle_request(Request, From, St);
+        #{ <<"chat">> := Text } = Chat ->
+            ToAbbr = abbrev_enc(To),
+            Target = maps:get(<<"group">>, Chat, ToAbbr),
+            Hdr = [abbrev_enc(From), " -> ", Target],
+            ae_scm_chat:info("~s~n~s", [Hdr, Text]);
         _ ->
             %% TODO: pass on to user
             St

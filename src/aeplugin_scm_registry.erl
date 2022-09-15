@@ -4,6 +4,12 @@
 	, register_customer/2
 	, register_merchant/4 ]).
 
+-export([ create_chat_group/1
+        , join_chat_group/2
+        , leave_chat_group/1
+        , list_chat_groups/0
+        , chat_group_members/1 ]).
+
 -export([ list_merchants/0
         , list_customers/0
         , market_responder_pids/0
@@ -16,6 +22,8 @@
         , locate_market_side/1 ]).
 
 -define(MARKET, ae_scm_demo).
+
+-define(TRY(Expr, Else), try Expr catch error:_ -> Else end).
 
 -type id() :: aeser_id:id().
 
@@ -100,3 +108,25 @@ names_by_id(Id) ->
 
 customers_by_merchant_id(Id) ->
     gproc:select({l,p}, [{ {{p,l,{?MODULE, session, Id}},'_','$1'}, [], ['$1']}]).
+
+create_chat_group(Name) when is_binary(Name) ->
+    ?TRY(gproc:reg({n,l,{?MODULE, group, Name}}), error).
+
+join_chat_group(Name, Id) when is_binary(Name) ->
+    case aeser_id:is_id(Id) of
+        true ->
+            ?TRY(gproc:reg({p,l,{?MODULE,group,Name}}, Id), error);
+        false ->
+            error({invalid_id, Id})
+    end.
+
+list_chat_groups() ->
+    gproc:select({l,n}, [{ {n,l, {?MODULE, group, '$1'}, '_', '_'},
+                           [], ['$1'] }]).
+
+leave_chat_group(Name) ->
+    ?TRY(gproc:unreg({p,l,{?MODULE,group,Name}}), error).
+
+chat_group_members(Name) ->
+    gproc:select({l,p}, [{ {p,l,{?MODULE, group, Name},'_','$1'},
+                           [], ['$1'] }]).

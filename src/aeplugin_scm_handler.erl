@@ -5,7 +5,7 @@
 
 -export([ init/2
         , content_types_provided/2
-        , index_html/2
+        , to_html/2
         , json_api/2
         ]).
 
@@ -16,6 +16,8 @@ routes() ->
      {'_', [ {"/", ?MODULE, []}
            , {"/connect_customer/", ?MODULE, []}
            , {"/connect_merchant/", ?MODULE, []}
+           , {"/customer/", ?MODULE, []}
+           , {"/send_chat_msg", ?MODULE, []}
            , {"/seed_accounts/", ?MODULE, []}
            , {"/status", ?MODULE, []}
            ]}
@@ -26,11 +28,14 @@ init(Req, Opts) ->
     {cowboy_rest, Req, Opts}.
 
 content_types_provided(Req, State) ->
-    Result = serve_request(Req),
+    {Result, Req1} = case serve_request(Req) of
+                         ok -> {ok, Req};
+                         {ok, _} = Ok -> Ok
+                     end,
     {[
-       {<<"text/html">>, index_html},
+       {<<"text/html">>, to_html},
        {<<"application/json">>, json_api}
-     ], Req#{'$result' => Result}, State}.
+     ], Req1#{'$result' => Result}, State}.
 
 json_api(#{'$result' := Result, qs := Qs} = Req, State) ->
     Response0 = case Result of
@@ -50,7 +55,13 @@ json_api(#{'$result' := Result, qs := Qs} = Req, State) ->
                     end),
     {JSON, Req, State}.
 
-index_html(Req, State) ->
+to_html(#{path := <<"/">>} = Req, State) ->
+    lager:debug("to_html called", []),
+    Merchants = [{M,
+                  aeplugin_scm_registry:names_by_id(M),
+                  aeplugin_scm_registry:tags_by_id(M)}
+                 || M <- aeplugin_scm_registry:list_merchants()],
+    Customers = aeplugin_scm_registry:list_customers(),
     Balances = aeplugin_dev_mode_handler:account_balances(),
     HTML = html(
              {html,
@@ -63,26 +74,17 @@ index_html(Req, State) ->
                {body,
                 [{a, #{href => <<"/">>}, <<"home">>},
                  {h2, <<"Merchants">>},
-                 merchant_table(Balances),
+                 merchant_table(Merchants, Balances),
                  {h2, <<"Customers">>},
-                 customer_table(Balances),
+                 customer_table(Customers, Balances),
                  {p, []},
                  {p, [], <<"Total Market Balance: ", (total_market_balance())/binary>>},
                  {h2, <<"Actions">>},
                  {a, #{href => <<"/seed_accounts">>}, <<"Seed Accounts">>},
                  {p, []},
+                 chat_form(Customers, Merchants),
                  connect_customer_form(),
                  connect_merchant_form()
-                 %% {a, #{href => <<"/start">>, method => get}, <<"Start server">>},
-                 %% {p, []},
-                 %% {a, #{href => <<"/stop">>, method => get}, <<"Stop server">>},
-                 %% {p, []},
-                 %% {hr, []},
-                 %% {h3, <<"Chain:">>},
-                 %% {p, [<<"Top height: ">>, integer_to_binary(aec_chain:top_height())]},
-                 %% {p, [<<"Mempool size: ">>, integer_to_binary(aec_tx_pool:size())]},
-                 %% {h4, <<"Account balances">>},
-                 %% accounts_table()
                 ]}
               ]}),
     {HTML, Req, State}.
@@ -95,11 +97,7 @@ total_market_balance() ->
             end, 0, aeplugin_scm_registry:market_responder_pids()),
     integer_to_binary(Sum).
 
-merchant_table(Balances) ->
-    Merchants = [{M,
-                  aeplugin_scm_registry:names_by_id(M),
-                  aeplugin_scm_registry:tags_by_id(M)}
-                 || M <- aeplugin_scm_registry:list_merchants()],
+merchant_table(Merchants, Balances) ->
     {table,
      [{tr, [{th, <<"Id">>},
             {th, <<"Name(s)">>},
@@ -124,8 +122,7 @@ merchant_table(Balances) ->
                   end
           end, Merchants)]}.
 
-customer_table(Balances) ->
-    Customers = aeplugin_scm_registry:list_customers(),
+customer_table(Customers, Balances) ->
     {table,
      [{tr, [{th, <<"Id">>},
             {th, <<"On-Chain Bal">>},
@@ -145,6 +142,39 @@ customer_table(Balances) ->
                                 {td, integer_to_binary(Br)}]}
                   end
           end, Customers)]}.
+
+full_options_list(Customers, Merchants) ->
+    COptions = [customer_option(C) || C <- Customers],
+    MOptions = lists:flatmap(fun merchant_options/1, Merchants),
+    COptions ++ [opt_divider(<<"Merchants">>) | MOptions].
+
+opt_divider(Txt) ->
+    {option, #{disabled => true}, <<"-- ", Txt/binary, " --">>}.
+
+customer_option(C) ->
+    Enc = encode_id(C),
+    {option, #{value => Enc}, abbrev(Enc)}.
+
+merchant_options({M, Names, _Tags}) ->
+    Enc = encode_id(M),
+    [{option, #{value => V}, N} || {V, N} <- [{Enc, abbrev(Enc)}
+                                             | [{Enc, N} || N <- Names]]].
+
+chat_form(Customers, Merchants) ->
+    Groups = aeplugin_scm_registry:list_groups(),
+    FullOptions = full_options_list(Customers, Merchants),
+    GroupOptions = [{option, #{value => <<"grp:", G/binary>>}, G}
+                    || G <- Groups],
+    {form, #{action => <<"/send_chat_msg">>, method => get},
+     [{label, #{for => from}, <<"From: ">>},
+      {select, #{name => from, id => from}, FullOptions},
+      {label, #{for => to}, <<"To: ">>},
+      {select, #{name => to, id => to}, FullOptions ++ [opt_divider(<<"Groups">>)
+                                                        | GroupOptions]},
+      {label, #{for => msg}, <<"Msg: ">>},
+      {input, #{type => text, id => msg, name => msg}, []},
+      {input, #{type => submit, value => <<"Send">>}, []}
+     ]}.
 
 connect_customer_form() ->
     EncIds = lists:map(fun encode_id/1, available_ids()),
@@ -171,6 +201,12 @@ connect_merchant_form() ->
 encode_id(Id) ->
     {account, Pub} = aeser_id:specialize(Id),
     aeser_api_encoder:encode(account_pubkey, Pub).
+
+abbrev_enc(Id) ->
+    abbrev(encode_id(Id)).
+
+abbrev(Str) ->
+    aeplugin_scm_util:abbrev_key(Str).
 
 available_ids() ->
     Viable = viable_ids(),
@@ -297,7 +333,27 @@ serve_request(#{path := <<"/connect_merchant">>, qs := Qs}) ->
                     ok
             end
     end;
-serve_request(#{path := <<"/seed_accounts">>}) ->
+serve_request(#{path := <<"send_chat_msg">>} = Req) ->
+    #{from := From, to := To, msg := Msg} =
+        cowboy_reg:match_qs([{P,nonempty} || P <- [from,to,msg]], Req),
+    FromId = aeser_id:create(account, From),
+    case To of
+        <<"grp:", G/binary>> ->
+            aeplugin_scm_sc:group_chat(FromId, G, Msg);
+        _ ->
+            ToId = aeser_id:create(account, To),
+            aeplugin_scm_sc:chat(FromId, To, Msg)
+    end,
+    ok;
+serve_request(#{path := <<"/customer">>, qs := Qs} = Req) ->
+    Params = httpd:parse_query(Qs),
+    case proplists:get_value(<<"cid">>, Params, undefined) of
+        undefined ->
+            ok;
+        CId ->
+            ok
+    end;
+serve_request(#{path := <<"/seed_accounts">>} = Req) ->
     lager:debug("seed_accounts", []),
     Amount = 10000000000000000,
     DemoKeyPairs = demo_keypairs(),
@@ -337,7 +393,7 @@ serve_request(#{path := <<"/seed_accounts">>}) ->
               lager:info("Push Result = ~p", [Res]),
               N+1
       end, Nonce, Pubs),
-    ok;
+    {ok, Req#{path => <<"/">>}};
 serve_request(#{path := <<"/auto_emit_mb">>, qs := Qs}) ->
     Params = httpd:parse_query(Qs),
     case {proplists:get_value(<<"auto_emit">>, Params, undefined),
