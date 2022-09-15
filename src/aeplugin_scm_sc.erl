@@ -53,10 +53,11 @@ respond(Host, Port, Opts) when is_map(Opts) ->
            , opts => apply_defaults(responder, Opts) }).
 
 chat(From, To, Msg) ->
+    lager:debug("From = ~p, To = ~p, Msg = ~s", [From, To, Msg]),
     send_msg(From, To, jsx:encode(#{<<"chat">> => Msg})).
 
 group_chat(From, Group, Text) ->
-    Members = aeplugin_scm_registry:chat_group_members(Group, From),
+    Members = aeplugin_scm_registry:chat_group_members(Group),
     case lists:member(From, Members) of
         true ->
             Msg = jsx:encode(#{<<"chat">> => Text, <<"group">> => Group}),
@@ -69,8 +70,10 @@ group_chat(From, Group, Text) ->
 send_msg(From, To, Msg) ->
     case aeplugin_scm_registry:locate_endpoint(From) of
         undefined ->
+            lager:debug("cannot find endpoint", []),
             {error, unknown_origin};
         Pid ->
+            lager:debug("endpoint = ~p", [Pid]),
             {account, ToPub} = aeser_id:specialize(To),
             gen_server:call(Pid, {send_msg, ToPub, Msg})
     end.
@@ -136,7 +139,7 @@ handle_call({pay, To, Amount, Msg}, _From, St) ->
     _AbsTimeout = new_send(To, Amount, HashLock, St),
     Res = await_contract_call(<<"collect">>, St),
     {reply, Res, St};
-handle_call(get_balances, From, #{fsm := Fsm} = St) ->
+handle_call(get_balances, _From, #{fsm := Fsm} = St) ->
     IPub = initiator_pub(St),
     RPub = responder_pub(St),
     {ok, [{IPub,Bi},{RPub,Br}]} = aesc_fsm:get_balances(Fsm, [IPub, RPub]),
@@ -214,7 +217,7 @@ handle_info({aesc_fsm, Fsm, #{ type := report
 handle_info({aesc_fsm, Fsm, #{ type := sign
                              , tag  := update_ack = Tag
                              , info := #{ signed_tx := SignedTx
-                                        , updates := [Update]}} = Msg},
+                                        , updates := [Update]}}},
             #{fsm := Fsm} = St) ->
     ae_scm:debug("~s SIGN update_ack", [my_nick(St)]),
     %% TODO: aesc_offchain_update lacks an API to simply get the update type
@@ -237,8 +240,6 @@ handle_info({aesc_fsm, Fsm, #{ type := sign
             {noreply, St#{ contract_id => ContractPubkey
                          , contract_abi_version => AbiVsn }};
         {call_contract, responder} ->
-            ContractPubkey = aesc_offchain_update:extract_contract_pubkey(
-                               Update),
             {Fun, Args} = extract_and_decode_call_data(Update),
             NewSignedTx = aeplugin_scm_signing:sign_tx(SignedTx, St),
             aesc_fsm:signing_response(Fsm, Tag, NewSignedTx),
@@ -249,7 +250,7 @@ handle_info({aesc_fsm, Fsm, #{ type := sign
             ae_scm:debug("~s CONTRACT_CALL to initiator", [my_nick(St)]),
             case extract_and_decode_call_data(Update) of
                 {<<"new_receive">>, [Amount, {address, FromPub},
-                                     AbsTimeout, {bytes, HashLock}]} ->
+                                     _AbsTimeout, {bytes, HashLock}]} ->
                     ae_scm:debug("~s NEW_RCV (~p, ~s, ...)", [my_nick(St),
                                                               Amount,
                                                               abbrev_enc(FromPub)]),
@@ -366,7 +367,8 @@ init_channel_responder(St) ->
 %% Common for both initiator and responder
 %%
 finalize_channel_setup(St0) ->
-    #{info := #{tx := SignedTx}} = receive_on_chain_tx(channel_create_tx, channel_changed, St0),
+    #{info := #{tx := SignedTx}} =
+        receive_on_chain_tx(channel_create_tx, channel_changed, St0),
     St = get_pubkeys_from_signed_create_tx(SignedTx, St0),
     receive_info_report(#{info => own_funding_locked}, St, ?LONG_TIMEOUT),
     lager:info("Awaiting min_depth confirmation (~p blocks)", [get_opt(minimum_depth, St)]),
@@ -476,9 +478,6 @@ my_nick(St) ->
 
 my_pub(#{opts := #{role := Role} = Opts}) ->
     maps:get(Role, Opts).
-
-my_id(#{opts := #{role := Role}, ids := Ids}) ->
-    maps:get(Role, Ids).
 
 initiator_pub(#{ids := #{initiator := IId}}) ->
     {account, Pub} = aeser_id:specialize(IId),
@@ -628,7 +627,8 @@ handle_inband_msg(Msg, From, To, St) ->
             ToAbbr = abbrev_enc(To),
             Target = maps:get(<<"group">>, Chat, ToAbbr),
             Hdr = [abbrev_enc(From), " -> ", Target],
-            ae_scm_chat:info("~s~n~s", [Hdr, Text]);
+            ae_scm_chat:info("~s~n~s", [Hdr, Text]),
+            St;
         _ ->
             %% TODO: pass on to user
             St
@@ -680,10 +680,10 @@ await_contract_call(F, #{fsm := Fsm} = St) ->
         {aesc_fsm, Fsm, #{ type := sign
                          , tag  := update_ack = Tag
                          , info := #{ signed_tx := SignedTx
-                                    , updates := [Update]}} = Msg}
+                                    , updates := [Update]}}}
           when element(1, Update) =:= call_contract ->
             CallData = aesc_offchain_update:extract_call_data(Update),
-            {F, Args} = fate_code_decode_call_data(CallData),
+            {F, _Args} = fate_code_decode_call_data(CallData),
             NewSignedTx = aeplugin_scm_signing:sign_tx(SignedTx, St),
             aesc_fsm:signing_response(Fsm, Tag, NewSignedTx),
             _ = receive_report(update, St),
@@ -696,7 +696,7 @@ forward_contract_call(F, Args, St) ->
     forward_contract_call(F, Args, my_role(St), St).
 
 forward_contract_call(<<"new_send">>, Args, responder, St) ->
-    [Amount, {address, ToPub}, Fee, Timeout, {bytes, HashLock}] = Args,
+    [Amount, {address, ToPub}, _Fee, Timeout, {bytes, HashLock}] = Args,
     ToId = aeser_id:create(account, ToPub),
     %% TODO: AbsTimeout is supposed to be taken from the return value of new_send()
     AbsTimeout = aec_chain:top_height() + Timeout,

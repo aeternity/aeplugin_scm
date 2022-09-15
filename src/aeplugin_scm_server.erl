@@ -44,6 +44,7 @@ init([]) ->
     jobs:add_queue(?MODULE, [ {producer, fun job_init/0}
                             , {standard_counter, 10} ]),
     KP = market_keypair(),
+    aeplugin_scm_registry:create_chat_group(<<"SCM">>),
     %% Id = aeser_id:create(account, Pub),
     ChOpts = aeplugin_scm_util:channel_opts(responder, KP, any),
     {ok, #st{ channel_opts = ChOpts }}.

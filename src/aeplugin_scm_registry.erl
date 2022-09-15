@@ -35,6 +35,7 @@ register_session(#{opts := #{ role := Role } = Opts, ids := Ids}) ->
 	    ok;
 	initiator ->
             gproc:reg({n,l, {?MODULE, endpoint, I}}, R),
+            join_chat_group(<<"SCM">>, I),
             RegAs = maps:get(register_as, Opts, customer),
             case RegAs of
                 customer ->
@@ -121,12 +122,12 @@ join_chat_group(Name, Id) when is_binary(Name) ->
     end.
 
 list_chat_groups() ->
-    gproc:select({l,n}, [{ {n,l, {?MODULE, group, '$1'}, '_', '_'},
+    gproc:select({l,n}, [{ {{n,l, {?MODULE, group, '$1'}}, '_', '_'},
                            [], ['$1'] }]).
 
 leave_chat_group(Name) ->
     ?TRY(gproc:unreg({p,l,{?MODULE,group,Name}}), error).
 
 chat_group_members(Name) ->
-    gproc:select({l,p}, [{ {p,l,{?MODULE, group, Name},'_','$1'},
+    gproc:select({l,p}, [{ {{p,l,{?MODULE, group, Name}},'_','$1'},
                            [], ['$1'] }]).

@@ -17,7 +17,8 @@ routes() ->
            , {"/connect_customer/", ?MODULE, []}
            , {"/connect_merchant/", ?MODULE, []}
            , {"/customer/", ?MODULE, []}
-           , {"/send_chat_msg", ?MODULE, []}
+           , {"/send_chat_msg/", ?MODULE, []}
+           , {"/send_payment/", ?MODULE, []}
            , {"/seed_accounts/", ?MODULE, []}
            , {"/status", ?MODULE, []}
            ]}
@@ -55,7 +56,7 @@ json_api(#{'$result' := Result, qs := Qs} = Req, State) ->
                     end),
     {JSON, Req, State}.
 
-to_html(#{path := <<"/">>} = Req, State) ->
+to_html(Req, State) ->
     lager:debug("to_html called", []),
     Merchants = [{M,
                   aeplugin_scm_registry:names_by_id(M),
@@ -83,6 +84,7 @@ to_html(#{path := <<"/">>} = Req, State) ->
                  {a, #{href => <<"/seed_accounts">>}, <<"Seed Accounts">>},
                  {p, []},
                  chat_form(Customers, Merchants),
+                 payment_form(Customers, Merchants),
                  connect_customer_form(),
                  connect_merchant_form()
                 ]}
@@ -160,8 +162,9 @@ merchant_options({M, Names, _Tags}) ->
     [{option, #{value => V}, N} || {V, N} <- [{Enc, abbrev(Enc)}
                                              | [{Enc, N} || N <- Names]]].
 
+chat_form([], []) -> [];
 chat_form(Customers, Merchants) ->
-    Groups = aeplugin_scm_registry:list_groups(),
+    Groups = aeplugin_scm_registry:list_chat_groups(),
     FullOptions = full_options_list(Customers, Merchants),
     GroupOptions = [{option, #{value => <<"grp:", G/binary>>}, G}
                     || G <- Groups],
@@ -174,6 +177,23 @@ chat_form(Customers, Merchants) ->
       {label, #{for => msg}, <<"Msg: ">>},
       {input, #{type => text, id => msg, name => msg}, []},
       {input, #{type => submit, value => <<"Send">>}, []}
+     ]}.
+
+payment_form([], _) -> [];
+payment_form(_, []) -> [];
+payment_form(Customers, Merchants) ->
+    COptions = [customer_option(C) || C <- Customers],
+    MOptions = lists:flatmap(fun merchant_options/1, Merchants),
+    {form, #{action => <<"/send_payment">>, method => get},
+     [{label, #{for => from}, <<"From: ">>},
+      {select, #{name => from, id => from}, COptions},
+      {label, #{for => to}, <<"To: ">>},
+      {select, #{name => to, id => to}, MOptions},
+      {label, #{for => amount}, <<"Amount: ">>},
+      {input, #{type => text, id => amount, name => amount}, []},
+      {label, #{for => msg}, <<"Msg: ">>},
+      {input, #{type => text, id => msg, name => msg}, []},
+      {input, #{type => submit, value => <<"Send Payment">>}, []}
      ]}.
 
 connect_customer_form() ->
@@ -202,9 +222,6 @@ encode_id(Id) ->
     {account, Pub} = aeser_id:specialize(Id),
     aeser_api_encoder:encode(account_pubkey, Pub).
 
-abbrev_enc(Id) ->
-    abbrev(encode_id(Id)).
-
 abbrev(Str) ->
     aeplugin_scm_util:abbrev_key(Str).
 
@@ -230,50 +247,9 @@ viable_ids() ->
                 Bal > 100000000000000],
     [aeser_id:create(account, Pu) || {Pu,Pr,_} <- Accts, Pr =/= <<>>].
 
-
-accounts_table() ->
-    Balances = account_balances(),
-    {table,
-     [{tr, [{th, <<"Pub Key">>},
-            {th, <<"Priv Key">>},
-            {th, <<"Balance">>}]}
-     | lists:map(
-         fun({K, V}) ->
-                 Strong = is_demo_pubkey(K),
-                 EncKey = aeser_api_encoder:encode(account_pubkey, K),
-                 {tr, [{td, maybe_strong(Strong, EncKey)},
-                       {td, maybe_strong(Strong, privkey_if_demokey(K))},
-                       {td, maybe_strong(Strong, integer_to_binary(V))}]}
-         end, Balances) ]}.
-
-balances_json() ->
-    Balances = account_balances(),
-    lists:map(
-        fun({K, V}) ->
-                EncKey = aeser_api_encoder:encode(account_pubkey, K),
-                #{<<"public_key">> => EncKey, <<"balance">> => V }
-        end, Balances).
-
-devmode_accounts() ->
-    [#{<<"public_key">> => aeser_api_encoder:encode(account_pubkey, PubK),
-       <<"private_key">> => hexlify(PrivK)}
-     || {PubK,PrivK} <- demo_keypairs()].
-
-%% TODO: Don't list ALL account balances, as we can't assume dev mode
-account_balances() ->
-    aec_db:ensure_activity(
-      async_dirty,
-      fun() ->
-              {ok, Trees} = aec_chain:get_block_state(aec_chain:top_block_hash()),
-              aec_accounts_trees:get_all_accounts_balances(aec_trees:accounts(Trees))
-      end).
-
-maybe_strong(true , Text) -> {strong, Text};
-maybe_strong(false, Text) -> Text.
-
 serve_request(#{path := <<"/connect_customer">>, qs := Qs}) ->
     lager:debug("connect_customer", []),
-    Params = httpd:parse_query(Qs),
+    Params = parse_query(Qs),
     lager:debug("Params = ~p", [Params]),
     case proplists:get_value(<<"cid">>, Params, undefined) of
         undefined -> ok;
@@ -296,10 +272,11 @@ serve_request(#{path := <<"/connect_customer">>, qs := Qs}) ->
                     lager:debug("CId (~p) NOT available", [CId]),
                     ok
             end
-    end;
+    end,
+    ok;
 serve_request(#{path := <<"/connect_merchant">>, qs := Qs}) ->
     lager:debug("connect_merchant", []),
-    Params = httpd:parse_query(Qs),
+    Params = parse_query(Qs),
     lager:debug("Params = ~p", [Params]),
     case [proplists:get_value(K, Params, Default)
           || {K, Default} <- [ {<<"mid">>, undefined}
@@ -332,25 +309,47 @@ serve_request(#{path := <<"/connect_merchant">>, qs := Qs}) ->
                     lager:debug("MId NOT available (~p)", [MId]),
                     ok
             end
-    end;
-serve_request(#{path := <<"send_chat_msg">>} = Req) ->
-    #{from := From, to := To, msg := Msg} =
-        cowboy_reg:match_qs([{P,nonempty} || P <- [from,to,msg]], Req),
-    FromId = aeser_id:create(account, From),
-    case To of
-        <<"grp:", G/binary>> ->
-            aeplugin_scm_sc:group_chat(FromId, G, Msg);
-        _ ->
-            ToId = aeser_id:create(account, To),
-            aeplugin_scm_sc:chat(FromId, To, Msg)
     end,
     ok;
-serve_request(#{path := <<"/customer">>, qs := Qs} = Req) ->
-    Params = httpd:parse_query(Qs),
+serve_request(#{path := <<"/send_chat_msg">>} = Req) ->
+    lager:debug("Send chat. Qs = ~p", [parse_query(maps:get(qs, Req))]),
+    #{from := From, to := To, msg := Msg} = Matched =
+        cowboy_req:match_qs([{P,nonempty} || P <- [from,to,msg]], Req),
+    lager:debug("Matched = ~p", [Matched]),
+    FromId = enc2id(From),
+    case To of
+        <<"grp:", G/binary>> ->
+            lager:debug("Send to group chat (~p)", [G]),
+            aeplugin_scm_sc:group_chat(FromId, G, Msg);
+        _ ->
+            lager:debug("Direct chat to ~s", [To]),
+            ToId = enc2id(To),
+            aeplugin_scm_sc:chat(FromId, ToId, Msg)
+    end,
+    ok;
+serve_request(#{path := <<"/send_payment">>} = Req) ->
+    lager:debug("Send payment. Qs ~p", [parse_query(maps:get(qs,Req))]),
+    #{from := From, to := To, amount := Amount, msg := Msg} = Matched =
+        cowboy_req:match_qs([{from, nonempty},
+                             {to, nonempty},
+                             {amount, int},
+                             msg], Req),
+    lager:debug("Matched = ~p", [Matched]),
+    case Amount > 0 of
+        true ->
+            FromId = enc2id(From),
+            ToId = enc2id(To),
+            aeplugin_scm_sc:send_payment(FromId, ToId, Amount, Msg);
+        false ->
+            ignore
+    end,
+    ok;
+serve_request(#{path := <<"/customer">>, qs := Qs}) ->
+    Params = parse_query(Qs),
     case proplists:get_value(<<"cid">>, Params, undefined) of
         undefined ->
             ok;
-        CId ->
+        _CId ->
             ok
     end;
 serve_request(#{path := <<"/seed_accounts">>} = Req) ->
@@ -377,108 +376,35 @@ serve_request(#{path := <<"/seed_accounts">>} = Req) ->
     {ok, Nonce} = aec_next_nonce:pick_for_account(Beneficiary),
     lager:debug("next nonce: ~p", [Nonce]),
     From = acct(Beneficiary),
-    lists:foldl(
-      fun(To, N) ->
-              {ok, Tx} = aec_spend_tx:new(#{sender_id => From,
-                                            recipient_id => acct(To),
-                                            amount => Amount,
-                                            nonce => N,
-                                            fee => 20000 * min_gas_price(),
-                                            ttl => 0,
-                                            payload => <<"scm_demo">>}),
-              lager:debug("Tx = ~p", [Tx]),
-              STx = sign_tx(Tx, BPriv),
-              lager:debug("Tx signed", []),
-              Res = aec_tx_pool:push(STx),
-              lager:info("Push Result = ~p", [Res]),
-              N+1
-      end, Nonce, Pubs),
+    {Hashes, _} =
+        lists:mapfoldl(
+          fun(To, N) ->
+                  {ok, Tx} = aec_spend_tx:new(
+                               #{sender_id => From,
+                                 recipient_id => acct(To),
+                                 amount => Amount,
+                                 nonce => N,
+                                 fee => 20000 * min_gas_price(),
+                                 ttl => 0,
+                                 payload => <<"scm_demo">>}),
+                  lager:debug("Tx = ~p", [Tx]),
+                  STx = sign_tx(Tx, BPriv),
+                  lager:debug("Tx signed", []),
+                  Res = aec_tx_pool:push(STx),
+                  lager:info("Push Result = ~p", [Res]),
+                  {aetx_sign:hash(STx), N+1}
+          end, Nonce, Pubs),
+    aeplugin_dev_mode_emitter:mine_until_txs_on_chain(Hashes, 10),
     {ok, Req#{path => <<"/">>}};
-serve_request(#{path := <<"/auto_emit_mb">>, qs := Qs}) ->
-    Params = httpd:parse_query(Qs),
-    case {proplists:get_value(<<"auto_emit">>, Params, undefined),
-          proplists:get_value(<<"previous">>, Params, undefined)} of
-        {undefined, <<"true">>}  -> set_auto_emit(false); % quirk of html checkboxes
-        {<<"off">>, _} -> set_auto_emit(false);
-        {<<"on">> , _} -> set_auto_emit(true);
-        _ -> ok
-    end;
-serve_request(#{path := <<"/spend">>, qs := Qs}) ->
-    Params = httpd:parse_query(Qs),
-    [From, To, AmountB] = [proplists:get_value(K, Params)
-                           || K <- [<<"from">>, <<"to">>, <<"amount">>]],
-    {ok, FromInt} = aeser_api_encoder:safe_decode(account_pubkey, From),
-    {ok, ToInt} = aeser_api_encoder:safe_decode(account_pubkey, To),
-    Amount = binary_to_integer(AmountB),
-    Balances = account_balances(),
-    {ok, Nonce} = aec_next_nonce:pick_for_account(FromInt),
-    case lists:keyfind(FromInt, 1, Balances) of
-        {_, Bal} when Bal > Amount ->
-            {ok, Tx} = aec_spend_tx:new(#{sender_id => acct(FromInt),
-                                          recipient_id => acct(ToInt),
-                                          amount => Amount,
-                                          nonce => Nonce,
-                                          fee => 20000 * min_gas_price(),
-                                          ttl => 0,
-                                          payload => <<"devmode demo">>}),
-            {_,Priv} = lists:keyfind(FromInt, 1, demo_keypairs()),
-            STx = sign_tx(Tx, Priv),
-            Res = aec_tx_pool:push(STx),
-            lager:info("Push Result = ~p", [Res]),
-            ok;
-        false ->
-            lager:info("'From' account not a known demo account", []),
-            {error, unknown_account}
-    end;
-serve_request(#{path := <<"/status">>}) ->
-    #{
-      <<"devmode_settings">> =>
-          #{
-             <<"auto_emit_microblocks">> => aeplugin_dev_mode_emitter:get_auto_emit_microblocks(),
-             <<"keyblock_interval">> => aeplugin_dev_mode_emitter:get_keyblock_interval(),
-             <<"microblock_interval">> => aeplugin_dev_mode_emitter:get_microblock_interval()
-           },
-      <<"chain">> =>
-          #{
-            <<"top_height">> => aec_chain:top_height(),
-            <<"top_hash">> => encoded_top_hash(),
-            <<"mempool_height">> => aec_tx_pool:size(),
-            <<"all_balances">> => balances_json()
-           },
-      <<"accounts">> => devmode_accounts()
-     };
-serve_request(#{path := <<"/rollback">>, qs := Qs}) ->
-    OldHeight = aec_chain:top_height(),
-    OldHash = encoded_top_hash(),
-    Params = httpd:parse_query(Qs),
-    [H, B] = [proplists:get_value(K, Params, <<>>)
-              || K <- [<<"height">>, <<"hash">>]],
-    {ok, [[Root]]} = init:get_argument(root),
-    Script = filename:join(Root, "bin/aeternity db_rollback"),
-    Cmd = binary_to_list(
-            iolist_to_binary(
-              [Script,
-               [[" -h ", H] || H =/= <<>> ],
-               [[" -b ", B] || B =/= <<>> ]])),
-    lager:debug("Cmd = ~p~n", [Cmd]),
-    Res = os:cmd(Cmd),
-    lager:debug(">> ~s~n", [Res]),
-    #{ <<"old_height">> => OldHeight
-     , <<"old_top">> => OldHash };
 serve_request(_) ->
     ok.
 
-maybe_off(0) ->
-    " (off)";
-maybe_off(_) ->
-    "".
-
-set_auto_emit(Bool) when is_boolean(Bool) ->
-    aeplugin_dev_mode_emitter:auto_emit_microblocks(Bool),
-    lager:info("Auto-emit microblocks set to ~s", [if Bool -> "on"; true -> "off" end]).
+enc2id(Enc) ->
+    {ok, Pub} = aeser_api_encoder:safe_decode(account_pubkey, Enc),
+    aeser_id:create(account, Pub).
 
 parse_qs(Qs, Types, F) ->
-    Params = httpd:parse_query(Qs),
+    Params = parse_query(Qs),
     try lists:map(
           fun(PSpec) ->
                   case parse_param(PSpec, Params) of
@@ -522,18 +448,6 @@ sign_tx(Tx, PrivKey) ->
 acct(Key) ->
     aeser_id:create(account, Key).
 
-is_demo_pubkey(K) ->
-    lists:keymember(K, 1, demo_keypairs()).
-
-privkey_if_demokey(Pub) ->
-    case is_demo_pubkey(Pub) of
-        true ->
-            {_, Priv} = lists:keyfind(Pub, 1, demo_keypairs()),
-            hexlify(Priv);
-        false ->
-            <<"-">>
-    end.
-
 min_gas_price() ->
     aec_tx_pool:minimum_miner_gas_price().
 
@@ -570,12 +484,6 @@ patron_keypair() ->
     #{pubkey := Pub, privkey := Priv} = aecore_env:patron_keypair_for_testing(),
     {Pub, Priv}.
 
-hexlify(Bin) when is_binary(Bin) ->
-    << <<(hex(H)),(hex(L))>> || <<H:4,L:4>> <= Bin >>.
-
-hex(C) when C < 10 -> $0 + C;
-    hex(C) -> $a + C - 10.
-
 to_bin(B) when is_binary(B) ->
     B;
 to_bin(A) when is_atom(A) ->
@@ -591,10 +499,6 @@ chain_status(Res) ->
     Res#{ <<"chain">> => #{ <<"height">> => Height
                           , <<"top_hash">> => encoded_top_hash(TopHdr) }}.
 
-encoded_top_hash() ->
-    TopHdr = aec_chain:top_header(),
-    encoded_top_hash(TopHdr).
-
 encoded_top_hash(TopHdr) ->
     {ok, TopHash} = aec_headers:hash_header(TopHdr),
     Type = case aec_headers:type(TopHdr) of
@@ -602,11 +506,6 @@ encoded_top_hash(TopHdr) ->
                micro -> micro_block_hash
            end,
     aeser_api_encoder:encode(Type, TopHash).
-
-
-deterministic_keypair() ->
-    #{public := PK, secret := SK} = enacl:sign_seed_keypair(<<"asdf">>),
-    #{pubkey => PK, privkey => SK}.
 
 intersperse(L) ->
     intersperse(L, <<", ">>).
@@ -619,3 +518,5 @@ intersperse([], _) ->
 account_balance(K, Balances) ->
     integer_to_binary(proplists:get_value(K, Balances, 0)).
 
+parse_query(Qs) ->
+    uri_string:dissect_query(Qs).

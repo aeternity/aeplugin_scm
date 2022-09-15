@@ -86,24 +86,3 @@ contract_create_args(CompileRes) ->
     #{ vm_version  => ?VM_FATE_SOPHIA_3
      , abi_version => ?ABI_FATE_SOPHIA_1
      , code        => Code }.
-
-contract_call(ContractId, F, Args, Amount, A, B, Meta, Cfg) ->
-    {ok, CallData} = aefa_fate_code:encode_calldata(
-                       maps:get(fate_code, Meta), F, Args),
-    CallArgs = #{ contract      => ContractId
-                , abi_version   => aect_test_utils:abi_version()
-                , amount        => Amount
-                , call_data     => CallData
-                , return_result => true },
-    {A1, B1, CallRes} =
-        aesc_fsm_SUITE:upd_call_contract(A, B, CallArgs, Cfg),
-    {A1, B1, decode_callres(CallRes, F, Meta)}.
-
-%% NOTE: the `unit' data type comes back as `{{tuple, []}, {tuple, {}}}'
-%%
-decode_callres({ok, Value}, F, Meta) ->
-    {ok, aefa_fate_code:decode_result(maps:get(fate_code, Meta), F, Value)};
-decode_callres({error, Reason}, _, _) ->
-    {error, Reason};
-decode_callres({revert, Reason}, _F, _Meta) ->
-    {error, aeb_fate_encoding:deserialize(Reason)}.
