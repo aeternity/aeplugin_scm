@@ -128,7 +128,7 @@ role_specific_defaults(initiator) ->
     #{}.
 
 start(Opts) ->
-    gen_server:start(?MODULE, Opts#{parent => self()}, [{debug,[trace]}]).
+    gen_server:start(?MODULE, Opts#{parent => self()}, []).
 
 
 init(Opts) ->
@@ -265,6 +265,10 @@ handle_info({aesc_fsm, Fsm, #{ type := sign
                                   <<"receive">>,
                                   [FromPub, Amount, HashLock, Secret],
                                   0, St),
+                            lager:info("~s GOT ~p from ~s",
+                                       [my_nick(St),
+                                        Amount,
+                                        abbrev_enc(FromPub)]),
                             {noreply, St#{requests => maps:remove(HashLock, Reqs)}};
                         _ ->
                             aesc_fsm:signing_response(Fsm, Tag, {error, ?ERR_NOT_FOUND}),
