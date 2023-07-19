@@ -13,10 +13,11 @@
 		    "default" : 3
 		},
 		"channel_reserve" : {
-		    "type" : integer,
+		    "type" : "integer",
 		    "help" : "Channel reserve default",
 		    "default" : 100000000000000
 		}
 	    }
+	}
     }
 }

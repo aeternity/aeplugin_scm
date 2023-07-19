@@ -128,7 +128,7 @@ role_specific_defaults(initiator) ->
     #{}.
 
 start(Opts) ->
-    gen_server:start(?MODULE, Opts#{parent => self()}, [{debug,[trace]}]).
+    gen_server:start(?MODULE, Opts#{parent => self()}, []).
 
 
 init(Opts) ->
@@ -201,7 +201,7 @@ handle_info({aesc_fsm, Fsm, #{ tag  := message
                   #{info := #{ from := FromPub
                              , to := ToPub
                              , info := Info}} = Msg,
-                  {ok, Dec} = decrypt_msg(Info, FromPub, St),
+                  {ok, Dec} = decrypt_msg(Info, St),
                   ae_scm:debug("~s: MSG ~s -> ~s: ~s", [my_nick(St),
                                                         abbrev_enc(FromPub),
                                                         abbrev_enc(ToPub), Dec]),
@@ -265,6 +265,10 @@ handle_info({aesc_fsm, Fsm, #{ type := sign
                                   <<"receive">>,
                                   [FromPub, Amount, HashLock, Secret],
                                   0, St),
+                            lager:info("~s GOT ~p from ~s",
+                                       [my_nick(St),
+                                        Amount,
+                                        abbrev_enc(FromPub)]),
                             {noreply, St#{requests => maps:remove(HashLock, Reqs)}};
                         _ ->
                             aesc_fsm:signing_response(Fsm, Tag, {error, ?ERR_NOT_FOUND}),
@@ -502,21 +506,17 @@ msgs() ->
     {_, Msgs} = process_info(self(), messages),
     Msgs.
 
-encrypt_msg(Msg, TheirPub0, St) ->
-    MyPriv = my_priv(St),
-    Nonce = ?NONCE,
+encrypt_msg(Msg, TheirPub0) ->
     TheirPub = pubkey(TheirPub0),
     EncPub = enacl:crypto_sign_ed25519_public_to_curve25519(TheirPub),
-    EncPriv = enacl:crypto_sign_ed25519_secret_to_curve25519(MyPriv),
-    enacl:box(Msg, Nonce, EncPub, EncPriv).
+    enacl:box_seal(Msg, EncPub).
 
-decrypt_msg(Msg, TheirPub0, St) ->
+decrypt_msg(Msg, St) ->
+    MyPub = my_pub(St),
     MyPriv = my_priv(St),
-    Nonce = ?NONCE,
-    TheirPub = pubkey(TheirPub0),
-    EncPub = enacl:crypto_sign_ed25519_public_to_curve25519(TheirPub),
-    EncPriv = enacl:crypto_sign_ed25519_secret_to_curve25519(MyPriv),
-    enacl:box_open(Msg, Nonce, EncPub, EncPriv).
+    EncPub = enacl:crypto_sign_ed25519_public_to_curve25519(MyPub),
+    DecPriv = enacl:crypto_sign_ed25519_secret_to_curve25519(MyPriv),
+    enacl:box_seal_open(Msg, EncPub, DecPriv).
 
 maybe_load_contract(St) ->
     case my_role(St) of
@@ -571,8 +571,8 @@ my_priv(#{privkey := Priv}) ->
 
 do_send_msg(To, Msg, #{fsm := Fsm} = St) ->
     ae_scm:info("SND MSG: ~s -> ~s - ~s", [my_nick(St), abbrev_enc(To),
-                                            truncate(Msg)]),
-    Encrypted = encrypt_msg(Msg, pubkey(To), St),
+                                           truncate(Msg)]),
+    Encrypted = encrypt_msg(Msg, To),
     aesc_fsm:inband_msg(Fsm, To, Encrypted).
 
 request_hashlock(To, Amount, Msg, St) ->
@@ -605,7 +605,7 @@ receive_and_decrypt_msg(From, #{fsm := Fsm} = St) ->
                          , type := report
                          , info := #{ from := From
                                     , info := Msg }}} ->
-            {ok, Decrypted} = decrypt_msg(Msg, From, St),
+            {ok, Decrypted} = decrypt_msg(Msg, St),
             Decrypted
     after ?LONG_TIMEOUT ->
             {error, {timeout, receive_inband_msg}}

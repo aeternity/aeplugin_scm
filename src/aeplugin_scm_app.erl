@@ -45,18 +45,25 @@ create_lager_sink(Sink) ->
         true ->
             ok;
         false ->
-            Fname = sink_file_name(Sink),
             lager_app:configure_sink(
-              Sink, [{handlers,
-                      [{lager_file_backend,
-                        [{file, Fname},
-                         {level, debug},
-                         {size, 4194303},
-                         {date, "$D0"},
-                         {count, 3}]}
-                      ]}
-                    ])
+              Sink, [{handlers, sink_handlers(Sink)}])
     end.
+
+sink_handlers(?LAGER_CHAT_SINK = Sink) ->
+    [{lager_console_backend, [{level, info}]},
+     sink_file_backend(Sink)];
+sink_handlers(?LAGER_SINK = Sink) ->
+    [sink_file_backend(Sink)].
+
+sink_file_backend(Sink) ->
+    Fname = sink_file_name(Sink),
+    {lager_file_backend,
+     [{file, Fname},
+      {level, debug},
+      {size, 4194303},
+      {date, "$D0"},
+      {count, 3}
+     ]}.
 
 sink_file_name(?LAGER_SINK) -> "ae_scm.log";
 sink_file_name(?LAGER_CHAT_SINK) -> "ae_scm_chat.log".

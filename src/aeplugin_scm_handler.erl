@@ -63,7 +63,7 @@ to_html(Req, State) ->
                   aeplugin_scm_registry:tags_by_id(M)}
                  || M <- aeplugin_scm_registry:list_merchants()],
     Customers = aeplugin_scm_registry:list_customers(),
-    Balances = aeplugin_dev_mode_handler:account_balances(),
+    Balances = account_balances(),
     HTML = html(
              {html,
               [{head, [meta(),
@@ -236,14 +236,14 @@ customer_or_merchant(Id) ->
         (aeplugin_scm_registry:locate_merchant(Id) =/= undefined).
 
 viable_ids() ->
-    DemoPairs0 = aeplugin_dev_mode_handler:demo_keypairs(),
+    DemoPairs0 = demo_keypairs(),
     DemoPairs = lists:keydelete(
                   aeplugin_scm_server:market_pubkey(), 1, DemoPairs0),
     Priv = fun(Pub) ->
                    proplists:get_value(Pub, DemoPairs, <<>>)
            end,
     Accts = [{Pub, Priv(Pub), Bal}
-             || {Pub, Bal} <- aeplugin_dev_mode_handler:account_balances(),
+             || {Pub, Bal} <- account_balances(),
                 Bal > 100000000000000],
     [aeser_id:create(account, Pu) || {Pu,Pr,_} <- Accts, Pr =/= <<>>].
 
@@ -260,7 +260,7 @@ serve_request(#{path := <<"/connect_customer">>, qs := Qs}) ->
             case lists:member(CId, available_ids()) of
                 true ->
                     lager:debug("CId is available", []),
-                    KeyPairs = aeplugin_dev_mode_handler:demo_keypairs(),
+                    KeyPairs = demo_keypairs(),
                     {PubK, PrivK} = lists:keyfind(CPub, 1, KeyPairs),
                     {Host, Port} = aeplugin_scm_server:market_endpoint(),
                     ChOpts = aeplugin_scm_util:channel_opts(
@@ -292,7 +292,7 @@ serve_request(#{path := <<"/connect_merchant">>, qs := Qs}) ->
             case lists:member(MId, available_ids()) of
                 true ->
                     lager:debug("MId available", []),
-                    KeyPairs = aeplugin_dev_mode_handler:demo_keypairs(),
+                    KeyPairs = demo_keypairs(),
                     {PubK, PrivK} = lists:keyfind(MPub, 1, KeyPairs),
                     {Host, Port} = aeplugin_scm_server:market_endpoint(),
                     ChOpts = aeplugin_scm_util:channel_opts(
@@ -356,12 +356,12 @@ serve_request(#{path := <<"/seed_accounts">>} = Req) ->
     lager:debug("seed_accounts", []),
     Amount = 10000000000000000,
     DemoKeyPairs = demo_keypairs(),
-    aeplugin_dev_mode_emitter:emit_keyblocks(5),
+    aedevmode_emitter:emit_keyblocks(5),
     Beneficiary = aec_headers:beneficiary(aec_chain:top_header()),
     lager:debug("Beneficiary: ~p", [Beneficiary]),
     {_, BPriv} = lists:keyfind(Beneficiary, 1, DemoKeyPairs),
     lager:debug("Found beneficiary privkey", []),
-    Bals = aeplugin_dev_mode_handler:account_balances(),
+    Bals = account_balances(),
     lager:debug("Bals = ~p", [Bals]),
     Pubs = lists:foldr(
              fun({PK,_}, Acc) ->
@@ -394,7 +394,7 @@ serve_request(#{path := <<"/seed_accounts">>} = Req) ->
                   lager:info("Push Result = ~p", [Res]),
                   {aetx_sign:hash(STx), N+1}
           end, Nonce, Pubs),
-    aeplugin_dev_mode_emitter:mine_until_txs_on_chain(Hashes, 10),
+    aedevmode_emitter:mine_until_txs_on_chain(Hashes, 10),
     {ok, Req#{path => <<"/">>}};
 serve_request(_) ->
     ok.
@@ -520,3 +520,7 @@ account_balance(K, Balances) ->
 
 parse_query(Qs) ->
     uri_string:dissect_query(Qs).
+
+account_balances() ->
+    {ok, Trees} = aec_chain:get_block_state(aec_chain:top_block_hash()),
+    aec_accounts_trees:get_all_accounts_balances(aec_trees:accounts(Trees)).
